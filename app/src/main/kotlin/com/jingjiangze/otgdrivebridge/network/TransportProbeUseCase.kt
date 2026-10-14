@@ -48,7 +48,10 @@ class TransportProbeUseCase(
             for (exposure in exposures.sortedBy { it.priorityRank() }) {
                 val available = runCatching { exposure.isAvailable() }.getOrDefault(false)
                 if (!available) continue
-                val endpoint = runCatching { exposure.start(localPort) }.getOrNull()
+                // start() already returns Result; flatten it (and tolerate a
+                // thrown exception) so `endpoint` is a PublicEndpoint rather
+                // than a nested Result.
+                val endpoint = runCatching { exposure.start(localPort).getOrThrow() }.getOrNull()
                 if (endpoint == null) continue
                 transports += Transport(
                     kind = if (exposure.id == "netbird-expose") TransportKind.VIRTUAL_LAN else TransportKind.TUNNEL,

@@ -59,6 +59,12 @@ android {
     }
 
     compileOptions {
+        // The protocol layer deliberately uses java.time and java.util.Base64
+        // instead of their android.* counterparts so it stays testable on a
+        // plain JVM. Both landed in API 26 while minSdk is 24, so the calls get
+        // rewritten to the desugar library; without this, lint's error-severity
+        // NewApi check fails the build.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -104,6 +110,9 @@ android {
 }
 
 dependencies {
+    // Rewrites java.time / java.util.Base64 (API 26) down to minSdk 24.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
     // Ktor server — CIO engine only (smallest server stack)
     implementation("io.ktor:ktor-server-core:2.3.12")
     implementation("io.ktor:ktor-server-cio:2.3.12")

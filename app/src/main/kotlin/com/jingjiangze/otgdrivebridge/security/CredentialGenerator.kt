@@ -11,8 +11,13 @@ import kotlin.math.ln
  */
 object CredentialGenerator {
 
-    /** No quote/backslash/space characters: safe to type into a Windows prompt. */
-    private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    /**
+     * No quote/backslash/space characters: safe to type into a Windows prompt.
+     *
+     * `internal` rather than `private` so tests can assert that every generated
+     * character comes from this set.
+     */
+    internal const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 
     const val DEFAULT_USERNAME = "otg"
     const val DEFAULT_PASSWORD_LENGTH = 24

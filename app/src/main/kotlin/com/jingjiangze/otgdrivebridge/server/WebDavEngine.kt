@@ -5,11 +5,13 @@ import com.jingjiangze.otgdrivebridge.webdav.DavStorage
 import com.jingjiangze.otgdrivebridge.webdav.LockManager
 import io.ktor.http.HttpMethod
 import io.ktor.server.application.Application
+// `handle { }` is a member of Route, but the `call` property its lambda sees is
+// this extension on PipelineContext, so it has to be imported explicitly.
+import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
-import io.ktor.server.routing.handle
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.flow.MutableStateFlow
