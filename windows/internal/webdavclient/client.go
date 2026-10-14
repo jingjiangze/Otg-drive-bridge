@@ -140,10 +140,27 @@ func (s *Server) Do(ctx context.Context, method, path string, body io.Reader, he
 func (s *Server) doReplayable(ctx context.Context, method, path string, body io.Reader, headers map[string]string, replay func() io.Reader) (*http.Response, error) {
 	streaming := body != nil && body != http.NoBody
 
+	// Whether a challenge has been recorded yet. The very first request of a
+	// session has not, and must go out unauthenticated to collect one; every
+	// later request carries the answer straight away.
+	firstContact := s.Client.NonceCount() == 0
+
 	// The first attempt carries no Authorization: the handshake has not happened
 	// yet, and sending an empty or stale header is what produces a 401 whose
 	// reason is not "no credentials yet".
-	resp, err := s.send(ctx, method, path, body, headers, "")
+	//
+	// Once a nonce is known, the attempt is sent *with* Authorization. Sending
+	// every request blind and answering the 401 is not a harmless extra round
+	// trip: the server counts requests per nonce and rejects a nonce-count that
+	// does not strictly increase (DigestAuthenticator.isNcIncreasing), so a
+	// client that re-challenges on every request restarts its counter each time
+	// and is refused from the second request onward. It also means the request
+	// runs twice, which for a body-carrying method is a truncated upload.
+	authorization := ""
+	if !firstContact {
+		authorization = s.authorize(method, path)
+	}
+	resp, err := s.send(ctx, method, path, body, headers, authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +168,13 @@ func (s *Server) doReplayable(ctx context.Context, method, path string, body io.
 		return resp, nil
 	}
 
+	// A 401 on a request that already carried credentials means the nonce the
+	// client holds is no longer the server's — aged out, or the server restarted.
+	// The challenge below is the fresh one, and answering it is the retry.
+	//
+	// It can also mean the credentials are simply wrong, which one retry cannot
+	// fix and must not turn into a loop: a wrong password otherwise becomes a
+	// hang.
 	challenge, ok := digest.ParseChallenge(resp.Header.Get("WWW-Authenticate"))
 	if !ok {
 		// Not a Digest challenge: a plain 401, or Basic. Either way there is
