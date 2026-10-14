@@ -94,7 +94,7 @@ CI（`.github/workflows/ci.yml`）三个 job：
 - `FileSystemDavStorageTest`、`LockManagerTest`（同文件 `webdav/FileSystemDavStorageTest.kt`）— CRUD、**中断写不毁原文件**、关闭未提交即丢弃、`overwrite=false` 拒绝、move/copy/递归删除、锁与 423、`If:` token 放行、过期清理；
 - `WebDavXmlTest`（`webdav/WebDavXmlTest.kt`）— `D:` 命名空间、`iscollection`、仅文件有 `content-length`、集合 href 尾斜杠、XML 转义、`lockdiscovery`、Allow 头方法集完整；
 - `TransportProbeUseCaseTest`、`NetBirdExposureTest`、`PublicEndpointTest`（同文件 `network/TransportProbeUseCaseTest.kt`）— 局域网优先、离线空列表、未开启互联网不探测、排序 LAN < VIRTUAL_LAN < TUNNEL、工具缺失不产卡片、隧道卡片带 100 MB 提示、URL 解析；
-- `WebDavEndToEndTest`（`server/WebDavEndToEndTest.kt`）— **真起 Ktor 服务器**（`127.0.0.1:18080`）跑完整 Digest 握手：OPTIONS 免认证 + `DAV`/`Allow` 头、401 challenge、PROPFIND multistatus、PUT/GET 往返、PUT 覆盖 204、Content-Length 不符 400、MKCOL、父目录缺失 409、穿越 400、MOVE/DELETE/COPY、LOCK→423→UNLOCK→PUT、`If:` token 放行、错口令 401、未知方法 405、HEAD Content-Length、UTF-8 文件名。
+- `WebDavEndToEndTest`（`server/WebDavEndToEndTest.kt`）— **真起 Ktor 服务器**（`127.0.0.1:18080`）跑完整 Digest 握手：OPTIONS 免认证 + `DAV`/`Allow` 头、401 challenge、PROPFIND multistatus、PUT/GET 往返、PUT 覆盖 204、MKCOL、父目录缺失 409、穿越 400、MOVE/DELETE/COPY、LOCK→423→UNLOCK→PUT、`If:` token 放行、错口令 401、未知方法 405、HEAD Content-Length、UTF-8 文件名。
 
 ## 手动验收清单（真机）
 

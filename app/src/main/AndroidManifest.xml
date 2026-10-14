@@ -11,6 +11,24 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!--
+        "All files access". Android's own documentation states this permission
+        covers "the root directory of both the USB on-the-go (OTG) drive and the
+        SD card" — which the SAF tree grant cannot reach, because Android 11+
+        refuses to let the user pick a removable volume's root. The MANAGED_PATH
+        storage track is built on it, and without this declaration the permission
+        can never be granted, so that track is dead on API 30+.
+
+        Google Play requires a declaration form for this permission and restricts
+        it to file-management-class apps; sideloaded and enterprise-distributed
+        builds are not subject to that review. ScopedStorage is lint's advisory
+        warning about exactly that policy, acknowledged here rather than left to
+        fail the lint gate.
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <application
         android:name=".OtgDriveBridgeApp"
         android:allowBackup="false"

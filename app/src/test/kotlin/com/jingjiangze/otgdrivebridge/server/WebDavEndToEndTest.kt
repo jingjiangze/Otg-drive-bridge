@@ -133,13 +133,14 @@ class WebDavEndToEndTest {
     }
 
     @Test
-    fun `content-length mismatch does not publish a truncated file`() = runBlocking {
-        // Announce 100 bytes but send only 5: the original file must survive.
+    fun `an overwrite leaves no residue from the previous payload`() = runBlocking {
         authorizedRequest("PUT", "/keep.bin") { setBody("COMPLETE-PAYLOAD") }
-        val truncated = authorizedRequest("PUT", "/keep.bin") { setBody("SHORT") }
-        // Ktor's test client sends the real length, so simulate the mismatch by
-        // asserting the storage invariant directly through the handler contract.
-        assertEquals(HttpStatusCode.NoContent, truncated.status)
+        val overwrite = authorizedRequest("PUT", "/keep.bin") { setBody("SHORT") }
+        // NOTE: this is not the Content-Length-mismatch path. Ktor's client always
+        // sends the real length, so the 400 the handler returns for a declared/
+        // actual mismatch can only be driven by a raw socket request — that case
+        // belongs to the cross-language interop suite, not here.
+        assertEquals(HttpStatusCode.NoContent, overwrite.status)
         assertEquals("SHORT", authorizedRequest("GET", "/keep.bin").bodyAsText())
     }
 
