@@ -102,3 +102,64 @@ jobs:
           APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
           sha256sum "$APK" | tee app/build/outputs/apk/debug/SHA256SUMS.txt
           echo "APK=$APK" >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------- go client tests
+  # The Windows side of the bridge: the Digest client and the WebDAV client.
+  # Both are pure Go with no cgo, so they run on a Linux runner.
+  #
+  # This job is the gate for the nine protocol gaps the audit named — a stale
+  # re-challenge, an opaque that must be echoed, a relative Destination,
+  # Overwrite, Depth, PROPPATCH, the error-body shape, ETag/If-Match and
+  # 100-continue. Each one has a named test in
+  # windows/internal/webdavclient/client_test.go, so a regression here is a
+  # protocol regression, not a style complaint.
+  #
+  # The CfApi provider is *not* built here: it needs cgo and Windows headers,
+  # which is the go-windows job below.
+  go-client:
+    name: Go client (linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # No cache-dependency-path: this module has no external dependencies
+      # (stdlib only), so there is no go.sum to key a cache on. When the
+      # discovery and webdav-server stages add hashicorp/mdns and x/net/webdav,
+      # add `cache-dependency-path: windows/go.sum` back.
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # `go test` is the only verification that runs on this machine for Go.
+      # The rule against local builds applies to the developer's PC, not to CI.
+      - name: Test
+        run: go test ./... -count=1 -race
+
+      - name: Test with coverage
+        run: go test ./... -count=1 -coverprofile=coverage.out
+        continue-on-error: true
+
+      - name: Publish coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-client-coverage
+          path: windows/coverage.out
+          if-no-files-found: ignore

@@ -13,17 +13,10 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.headers
-import io.ktor.server.application.call
-import io.ktor.server.cio.CIO as ServerCio
-import io.ktor.server.engine.embeddedServer
-import io.ktor.server.routing.route
-import io.ktor.server.routing.routing
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -36,6 +29,11 @@ import java.nio.file.Files
  * answers the Digest challenge, then exercises read, write, rename, delete and
  * locking. It replaces the "no device available" gap the audit flagged for the
  * protocol layer (device-dependent behaviour still needs a phone — see V1–V8).
+ *
+ * The server is started through [ServerBootstrap] on purpose: the cross-language
+ * interop harness boots the very same function, so a difference this test sees
+ * and the harness does not (or the other way round) cannot be an assembly
+ * difference — it has to be a protocol one.
  */
 class WebDavEndToEndTest {
 
@@ -46,32 +44,21 @@ class WebDavEndToEndTest {
     }
 
     private lateinit var root: java.io.File
-    private lateinit var server: io.ktor.server.engine.ApplicationEngine
+    private lateinit var server: ServerBootstrap.StartedServer
     private lateinit var client: HttpClient
     private val authenticator = DigestAuthenticator()
 
     @BeforeEach
     fun setUp() {
         root = Files.createTempDirectory("otg-e2e").toFile()
-        val storage = FileSystemDavStorage(root)
-        val handler = WebDavRequestHandler(
-            storage = storage,
+        server = ServerBootstrap.start(
+            port = PORT,
+            storage = FileSystemDavStorage(root),
+            credentialProvider = { DigestAuthenticator.Credentials(USERNAME, PASSWORD) },
+            host = "127.0.0.1",
             authenticator = authenticator,
             lockManager = LockManager()
         )
-        handler.credentialProvider = {
-            DigestAuthenticator.Credentials(USERNAME, PASSWORD)
-        }
-        server = embeddedServer(ServerCio, port = PORT, host = "127.0.0.1") {
-            routing {
-                // Mirrors WebDavEngine: one method-less catch-all, so the handler
-                // owns method dispatch (and answers 405 for unknown verbs).
-                route("/{...}") {
-                    handle { handler.handle(call) }
-                }
-            }
-        }
-        server.start(wait = false)
         client = HttpClient(CIO) {
             expectSuccess = false
         }
@@ -80,7 +67,7 @@ class WebDavEndToEndTest {
     @AfterEach
     fun tearDown() {
         runCatching { client.close() }
-        runCatching { server.stop(500, 1000) }
+        runCatching { server.close() }
         runCatching { root.deleteRecursively() }
     }
 

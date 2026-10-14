@@ -3,16 +3,7 @@ package com.jingjiangze.otgdrivebridge.server
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
 import com.jingjiangze.otgdrivebridge.webdav.DavStorage
 import com.jingjiangze.otgdrivebridge.webdav.LockManager
-import io.ktor.server.application.Application
-// `handle { }` is a member of Route, but the `call` property its lambda sees is
-// this extension on PipelineContext, so it has to be imported explicitly.
-import io.ktor.server.application.call
-import io.ktor.server.application.install
-import io.ktor.server.cio.CIO
 import io.ktor.server.engine.ApplicationEngine
-import io.ktor.server.engine.embeddedServer
-import io.ktor.server.routing.route
-import io.ktor.server.routing.routing
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -62,20 +53,17 @@ class WebDavEngine(
             IllegalStateException("Shared root is not available")
         )
         return runCatching {
-            val requestHandler = WebDavRequestHandler(
+            val started = ServerBootstrap.start(
+                port = port,
                 storage = storage,
+                credentialProvider = credentialProvider,
+                host = BIND_ALL_INTERFACES,
                 authenticator = authenticator,
-                lockManager = lockManager
-            ).also {
-                it.credentialProvider = credentialProvider
-                it.onCompleted = { m, p, u, s -> onRequestLogged?.invoke(m, p, u, s) }
-            }
-            val application = embeddedServer(CIO, port = port, host = BIND_ALL_INTERFACES) {
-                configureModule(requestHandler)
-            }
-            application.start(wait = false)
-            engine = application
-            handler = requestHandler
+                lockManager = lockManager,
+                onCompleted = { m, p, u, s -> onRequestLogged?.invoke(m, p, u, s) }
+            )
+            engine = started.engine
+            handler = started.handler
             _state.value = ServerState(
                 isRunning = true,
                 port = port,
@@ -105,20 +93,6 @@ class WebDavEngine(
     }
 
     val isRunning: Boolean get() = engine != null
-
-    private fun Application.configureModule(requestHandler: WebDavRequestHandler) {
-        routing {
-            // One catch-all route with no method selector: every verb reaches the
-            // handler, which dispatches internally and answers 405 for anything
-            // it does not implement. Registering the methods one by one meant an
-            // unknown verb (TRACE, REPORT, …) never matched a route at all and
-            // Ktor answered 404, which tells a WebDAV client the resource is
-            // missing rather than the method unsupported.
-            route("/{...}") {
-                handle { requestHandler.handle(call) }
-            }
-        }
-    }
 
     companion object {
         const val DEFAULT_PORT = 8080
