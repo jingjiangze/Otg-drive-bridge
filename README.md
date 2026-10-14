@@ -28,7 +28,7 @@
   - **SAF 树授权**（`ACTION_OPEN_DOCUMENT_TREE` + `takePersistableUriPermission`）——最小权限路径，Android 11+ 也能用；
   - **`MANAGE_EXTERNAL_STORAGE`**（all-files access）——官方文档明确覆盖「OTG 盘与 SD 卡根目录」，可直接按路径操作。
 - **HTTP Digest 认证**（RFC 2617）——不用 Basic，因此不受 Windows `BasicAuthLevel` 限制、也不受 Office 365 弃用 Basic Auth 的影响。
-- **原子写**——PUT 先落到同分区临时文件（`.otgpart`）再 rename；FAT32/exFAT 无日志，写一半掉电不会留下半个文件。
+- **原子写**——`AtomicWriteHandle` 契约：先写暂存区，`commit()` 时才发布。`FileSystemDavStorage` 用同分区 `.otgpart` + rename；`SafDavStorage` 受 SAF 限制（无 rename 动词），改为 App `cacheDir` 暂存后经 `openOutputStream("wt")` 拷入目标，**中断时目标是截断态**——这一点的真机行为列在手动验收清单里。
 - **RFC 4918 锁**——`opaquelocktoken:` + `If:` 头，LOCK/UNLOCK 冲突返回 423。
 - **路径穿越防护**——`..` / `.` / 反斜杠 / NUL / Windows 保留名在**解码后**判定，编码绕过（`%2e%2e`、`..%2f`）同样拦截。
 - **前台服务保活**——`dataSync` 类型 + `PARTIAL_WAKE_LOCK` + 通知渠道；授权失效时自动停服而不是裸奔。
@@ -40,23 +40,23 @@
 | 层 | 位置 | 依赖 | 可测性 |
 |---|---|---|---|
 | 纯 JVM 协议层 | `security/` `webdav/` `server/` | 只用 Ktor + Kotlin 标准库 | **ubuntu runner 直接跑单元测试** |
-| Android 层 | `storage/` `network/` `service/` UI | SAF / ConnectivityManager / Compose | 需真机，走手动验收清单 |
+| Android 层 | `storage/` `network/` `service/`，以及根包的 `MainActivity`（Compose UI） | SAF / ConnectivityManager / Compose | 需真机，走手动验收清单 |
 
 关键接口 `DavStorage`（`webdav/DavStorage.kt`）隔离了「WebDAV 语义」与「文件系统后端」：
 
 ```kotlin
 interface DavStorage {
     fun isRootAvailable(): Boolean
-    fun node(path: List<String>): DavNode?
-    fun parentOf(path: List<String>): DavNode?
-    fun createFile(parent: List<String>, name: String, overwrite: Boolean): DavNode?
-    fun createDirectory(parent: List<String>, name: String): DavNode?
-    fun delete(path: List<String>): Boolean
-    fun move(from: List<String>, to: List<String>): Boolean
-    fun copy(from: List<String>, to: List<String>): Boolean
-    fun openRead(path: List<String>): InputStream?
-    fun openWrite(path: List<String>, overwrite: Boolean): AtomicWriteHandle?
-    fun mimeTypeOf(node: DavNode): String
+    fun node(segments: List<String>): DavNode?
+    fun parentOf(segments: List<String>): Pair<DavNode, String>?
+    fun createFile(parent: DavNode, name: String): DavNode?
+    fun createDirectory(parent: DavNode, name: String): DavNode?
+    fun delete(node: DavNode): Boolean
+    fun move(node: DavNode, destination: DavNode, newName: String = node.name): Boolean
+    fun copy(node: DavNode, destination: DavNode, newName: String = node.name): Boolean
+    fun openRead(node: DavNode): InputStream?
+    fun openWrite(node: DavNode, overwrite: Boolean): AtomicWriteHandle?
+    fun mimeTypeOf(name: String): String
 }
 ```
 
@@ -87,14 +87,14 @@ CI（`.github/workflows/ci.yml`）三个 job：
 | `lint` | `:app:lintDebug` | lint HTML 报告 |
 | `build` | `:app:assembleDebug`（依赖 test + lint 通过） | debug APK + `SHA256SUMS.txt` |
 
-单元测试覆盖：
+单元测试（6 个文件、10 个测试类）：
 
-- `WebDavPathsTest` — 路径穿越、`%2e%2e`、`..%2f`、反斜杠、NUL、Windows 保留名、UTF-8 往返、`+` 不解码成空格；
-- `DigestAuthenticatorTest` / `CredentialGeneratorTest` — challenge 格式、对/错口令、错 method、重放 nc、未知 nonce、畸形头、转义引号、熵；
-- `FileSystemDavStorageTest` / `LockManagerTest` — CRUD、**中断写不毁原文件**、关闭未提交即丢弃、`overwrite=false` 拒绝、move/copy/递归删除、锁与 423、`If:` token 放行、过期清理；
-- `WebDavXmlTest` — `D:` 命名空间、`iscollection`、仅文件有 `content-length`、集合 href 尾斜杠、XML 转义、`lockdiscovery`、Allow 头方法集完整；
-- `TransportProbeUseCaseTest` 等 — 局域网优先、离线空列表、未开启互联网不探测、排序 LAN < VIRTUAL_LAN < TUNNEL、工具缺失不产卡片、隧道卡片带 100 MB 提示、URL 解析；
-- `WebDavEndToEndTest` — **真起 Ktor 服务器**（`127.0.0.1:18080`）跑完整 Digest 握手：OPTIONS 免认证 + `DAV`/`Allow` 头、401 challenge、PROPFIND multistatus、PUT/GET 往返、PUT 覆盖 204、Content-Length 不符 400、MKCOL、父目录缺失 409、穿越 400、MOVE/DELETE/COPY、LOCK→423→UNLOCK→PUT、`If:` token 放行、错口令 401、未知方法 405、HEAD Content-Length、UTF-8 文件名。
+- `WebDavPathsTest`（`webdav/WebDavPathsTest.kt`）— 路径穿越、`%2e%2e`、`..%2f`、反斜杠、NUL、Windows 保留名、UTF-8 往返、`+` 不解码成空格；
+- `DigestAuthenticatorTest`、`CredentialGeneratorTest`（同文件 `security/DigestAuthenticatorTest.kt`）— challenge 格式、对/错口令、错 method、重放 nc、未知 nonce、畸形头、转义引号、熵；
+- `FileSystemDavStorageTest`、`LockManagerTest`（同文件 `webdav/FileSystemDavStorageTest.kt`）— CRUD、**中断写不毁原文件**、关闭未提交即丢弃、`overwrite=false` 拒绝、move/copy/递归删除、锁与 423、`If:` token 放行、过期清理；
+- `WebDavXmlTest`（`webdav/WebDavXmlTest.kt`）— `D:` 命名空间、`iscollection`、仅文件有 `content-length`、集合 href 尾斜杠、XML 转义、`lockdiscovery`、Allow 头方法集完整；
+- `TransportProbeUseCaseTest`、`NetBirdExposureTest`、`PublicEndpointTest`（同文件 `network/TransportProbeUseCaseTest.kt`）— 局域网优先、离线空列表、未开启互联网不探测、排序 LAN < VIRTUAL_LAN < TUNNEL、工具缺失不产卡片、隧道卡片带 100 MB 提示、URL 解析；
+- `WebDavEndToEndTest`（`server/WebDavEndToEndTest.kt`）— **真起 Ktor 服务器**（`127.0.0.1:18080`）跑完整 Digest 握手：OPTIONS 免认证 + `DAV`/`Allow` 头、401 challenge、PROPFIND multistatus、PUT/GET 往返、PUT 覆盖 204、Content-Length 不符 400、MKCOL、父目录缺失 409、穿越 400、MOVE/DELETE/COPY、LOCK→423→UNLOCK→PUT、`If:` token 放行、错口令 401、未知方法 405、HEAD Content-Length、UTF-8 文件名。
 
 ## 手动验收清单（真机）
 
@@ -114,7 +114,7 @@ CI（`.github/workflows/ci.yml`）三个 job：
 ## 路线图
 
 - [x] T0 仓库 + Gradle wrapper + CI 三 job
-- [x] T1 WebDAV 协议层（13 方法 + Digest + 锁 + 原子写 + 穿越防护）
+- [x] T1 WebDAV 协议层（12 方法 + Digest + 锁 + 原子写 + 穿越防护）
 - [x] T2 `DavStorage` 抽象 + 文件系统实现（可测）
 - [ ] T3 SAF 树授权全流程真机验收
 - [ ] T4 `MANAGE_EXTERNAL_STORAGE` 直路径轨道真机验收
@@ -134,6 +134,6 @@ CI（`.github/workflows/ci.yml`）三个 job：
 ## 许可与致谢
 
 - 本项目代码以 **MIT** 发布（见 `LICENSE`）。
-- 协议层设计参考了以下 Apache-2.0 / MIT 项目：`anujkumarprasad/webdav-server-apk`（Ktor/CIO + DocumentFile 引擎）、`messense/dav-server-rs`（方法集与 XML 形状）。
+- 协议层设计参考了以下 **Apache-2.0** 项目：`anujkumarprasad/webdav-server-apk`（Ktor/CIO + DocumentFile 引擎）、`messense/dav-server-rs`（方法集与 XML 形状）。
 - WebDAV 规范：[RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)；Digest 认证：[RFC 2617 §3.2.2](https://www.rfc-editor.org/rfc/rfc2617#section-3.2.2)。
 - 未采用 `miltonio/milton2`（AGPL，许可不兼容）与 `gregko/Mini-WebDAV-server-for-Android`（无 LICENSE 文件）。
