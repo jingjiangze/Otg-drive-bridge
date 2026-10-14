@@ -647,7 +647,7 @@ func TestRequestURIIsRootRelative(t *testing.T) {
 	f := newFakeServer(t)
 	f.putFile("/hello.txt", []byte("hello"))
 
-	if _, err := f.client.Get(context.Background(), "/hello.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/hello.txt"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	for i, rec := range f.authCallsSlice() {
@@ -669,7 +669,7 @@ func TestStaleChallengeRotatesNonce(t *testing.T) {
 	f.putFile("/a.txt", []byte("a"))
 
 	// First request completes the handshake.
-	if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 		t.Fatalf("first Get: %v", err)
 	}
 	before := f.client.Client.NonceCount()
@@ -678,7 +678,7 @@ func TestStaleChallengeRotatesNonce(t *testing.T) {
 	// the server has decided to drop.
 	f.armStale()
 
-	if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 		t.Fatalf("Get after stale: %v", err)
 	}
 
@@ -710,7 +710,7 @@ func TestForeignRealmIsNotAnswered(t *testing.T) {
 	f.realmOverride = "Some Other Realm"
 	f.mu.Unlock()
 
-	_, err := f.client.Get(context.Background(), "/a.txt")
+	err := f.mustGet(context.Background(), "/a.txt")
 	if err == nil {
 		t.Fatal("Get against a foreign realm succeeded; the client must not answer")
 	}
@@ -730,7 +730,7 @@ func TestOpaqueIsEchoed(t *testing.T) {
 	f := newFakeServer(t)
 	f.putFile("/a.txt", []byte("a"))
 
-	if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	records := f.authCallsSlice()
@@ -753,7 +753,7 @@ func TestNonceCountClimbs(t *testing.T) {
 	f.putFile("/a.txt", []byte("a"))
 
 	for i := 1; i <= 3; i++ {
-		if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+		if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 			t.Fatalf("Get #%d: %v", i, err)
 		}
 	}
@@ -773,10 +773,10 @@ func TestCnonceIsStableWithinSession(t *testing.T) {
 	f := newFakeServer(t)
 	f.putFile("/a.txt", []byte("a"))
 
-	if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 		t.Fatalf("first Get: %v", err)
 	}
-	if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 		t.Fatalf("second Get: %v", err)
 	}
 	records := f.authCallsSlice()
@@ -945,7 +945,7 @@ func TestOverwriteHeaderIsSent(t *testing.T) {
 func TestErrorBodiesArePlainText(t *testing.T) {
 	f := newFakeServer(t)
 
-	_, err := f.client.Get(context.Background(), "/missing.txt")
+	err := f.mustGet(context.Background(), "/missing.txt")
 	if err == nil {
 		t.Fatal("Get of a missing file succeeded")
 	}
@@ -1068,7 +1068,7 @@ func TestPutStreamRefusesWithoutHandshake(t *testing.T) {
 
 	// After a replayable request the handshake is on record and the stream goes
 	// through.
-	if _, err := f.client.Get(context.Background(), "/a.txt"); err != nil {
+	if err := f.mustGet(context.Background(), "/a.txt"); err != nil {
 		t.Fatalf("handshake Get: %v", err)
 	}
 	resp, err := f.client.PutStream(context.Background(), "/b.txt",
@@ -1238,6 +1238,22 @@ func TestContextCancellationStopsTheRequest(t *testing.T) {
 // --- small accessors used above -------------------------------------------
 
 func (f *fakeServer) authCallsSlice() []authRecord { return f.authRecords() }
+
+// mustGet performs a Get the caller does not intend to read.
+//
+// Get returns (io.ReadCloser, int64, http.Header, error) — four values, not one —
+// and the body is a live connection. A test that only wants the side effect
+// (the handshake, a 401, a header on record) still has to close it, or
+// httptest.Server.Close blocks on the outstanding request and the test hangs at
+// cleanup rather than at the assertion that failed.
+func (f *fakeServer) mustGet(ctx context.Context, path string) error {
+	body, _, _, err := f.client.Get(ctx, path)
+	if err != nil {
+		return err
+	}
+	body.Close()
+	return nil
+}
 
 func (f *fakeServer) putFile(name string, body []byte) {
 	f.mu.Lock()
