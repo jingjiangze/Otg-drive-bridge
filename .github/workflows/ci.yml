@@ -28,8 +28,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The ubuntu runner ships the Android SDK. android-actions/setup-android
+      # is deliberately not used: it runs `sdkmanager tools`, and that package
+      # no longer exists in the SDK repository, so the action aborts the job.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: bash tools/ci-android-sdk.sh
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -56,7 +59,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Set up Android SDK
+        run: bash tools/ci-android-sdk.sh
       - uses: gradle/actions/setup-gradle@v4
       - name: Run Android lint
         run: ./gradlew :app:lintDebug --stacktrace --no-daemon
@@ -79,7 +83,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Set up Android SDK
+        run: bash tools/ci-android-sdk.sh
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Assemble
