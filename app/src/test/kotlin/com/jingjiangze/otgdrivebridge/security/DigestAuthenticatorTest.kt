@@ -35,7 +35,7 @@ class DigestAuthenticatorTest {
     @Test
     fun `a client that answers correctly is authorized`() {
         val challenge = authenticator.challenge()
-        val parsed = DigestAuthenticator.parseHeader(challenge) ?: error("challenge unparseable")
+        val parsed = DigestAuthenticator.parseChallenge(challenge) ?: error("challenge unparseable")
         // Simulate a client: build the response hash for GET /.
         val cnonce = "0a4f113b"
         val nc = "00000001"
@@ -66,7 +66,7 @@ class DigestAuthenticatorTest {
     @Test
     fun `wrong password fails`() {
         val challenge = authenticator.challenge()
-        val parsed = DigestAuthenticator.parseHeader(challenge)!!
+        val parsed = DigestAuthenticator.parseChallenge(challenge)!!
         val response = authenticator.computeResponse(
             username = "otg",
             password = "wrong-password",
@@ -84,7 +84,7 @@ class DigestAuthenticatorTest {
     @Test
     fun `wrong method fails`() {
         val challenge = authenticator.challenge()
-        val parsed = DigestAuthenticator.parseHeader(challenge)!!
+        val parsed = DigestAuthenticator.parseChallenge(challenge)!!
         val response = authenticator.computeResponse(
             username = "otg", password = "correct-horse-battery",
             method = "GET", uri = "/", nonce = parsed.nonce,
@@ -97,7 +97,7 @@ class DigestAuthenticatorTest {
     @Test
     fun `replayed nonce count fails`() {
         val challenge = authenticator.challenge()
-        val parsed = DigestAuthenticator.parseHeader(challenge)!!
+        val parsed = DigestAuthenticator.parseChallenge(challenge)!!
         val response = authenticator.computeResponse(
             username = "otg", password = "correct-horse-battery",
             method = "GET", uri = "/", nonce = parsed.nonce,
@@ -149,7 +149,7 @@ class DigestAuthenticatorTest {
     }
 
     private fun headerFor(
-        challengeNonce: DigestAuthenticator.DigestHeader,
+        challengeNonce: DigestAuthenticator.Challenge,
         response: String,
         cnonce: String
     ) = DigestAuthenticator.DigestHeader(

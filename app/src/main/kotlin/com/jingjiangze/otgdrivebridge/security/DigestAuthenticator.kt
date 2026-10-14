@@ -40,6 +40,19 @@ class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
         val opaque: String?
     )
 
+    /**
+     * Parsed `WWW-Authenticate: Digest ...` fields — what a *client* reads out of
+     * a challenge before answering it. [DigestHeader] is the server-side view of
+     * the reply, so the two are not interchangeable.
+     */
+    data class Challenge(
+        val realm: String,
+        val nonce: String,
+        val opaque: String?,
+        val qop: String?,
+        val stale: Boolean
+    )
+
     /** Per-nonce replay/opaque bookkeeping. */
     private class NonceTracker {
         @Volatile var lastSeenMillis: Long = 0L
@@ -187,10 +200,10 @@ class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
         private val HEX = "0123456789abcdef".toCharArray()
 
         /**
-         * Parses an `Authorization: Digest ...` header value into [DigestHeader].
-         * Returns null when the value is not a well-formed Digest challenge response.
+         * Splits a `Digest key=value, key="value", ...` header into its fields.
+         * Returns null when the value is not a Digest header at all.
          */
-        fun parseHeader(value: String?): DigestHeader? {
+        private fun digestFields(value: String?): Map<String, String>? {
             if (value.isNullOrBlank()) return null
             val commaParts = value.split(',')
             if (commaParts.firstOrNull()?.trim()?.startsWith("Digest", ignoreCase = true) != true) return null
@@ -207,6 +220,32 @@ class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
                     raw
                 }
             }
+            return fields
+        }
+
+        /**
+         * Parses a `WWW-Authenticate: Digest ...` challenge. Returns null when
+         * the value carries no challenge (e.g. it is an Authorization reply).
+         */
+        fun parseChallenge(value: String?): Challenge? {
+            val fields = digestFields(value) ?: return null
+            val realm = fields["realm"] ?: return null
+            val nonce = fields["nonce"] ?: return null
+            return Challenge(
+                realm = realm,
+                nonce = nonce,
+                opaque = fields["opaque"],
+                qop = fields["qop"],
+                stale = fields["stale"]?.equals("true", ignoreCase = true) == true
+            )
+        }
+
+        /**
+         * Parses an `Authorization: Digest ...` header value into [DigestHeader].
+         * Returns null when the value is not a well-formed Digest challenge response.
+         */
+        fun parseHeader(value: String?): DigestHeader? {
+            val fields = digestFields(value) ?: return null
             val username = fields["username"] ?: return null
             val realm = fields["realm"] ?: return null
             val nonce = fields["nonce"] ?: return null

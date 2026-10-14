@@ -52,25 +52,39 @@ object WebDavPaths {
     /**
      * Percent-decodes a single path segment. `+` is *not* decoded to a space,
      * because path segments are not query strings.
+     *
+     * Escapes encode *bytes*, not characters: `%E4%B8%AD` is one three-byte
+     * UTF-8 sequence. A run of decoded bytes is therefore accumulated and
+     * decoded as UTF-8 as a whole — converting each byte to a `Char` on its own
+     * would turn every non-ASCII name into mojibake.
      */
     fun percentDecode(segment: String): String {
         if (segment.indexOf('%') < 0) return segment
         val out = StringBuilder(segment.length)
+        val pendingBytes = java.io.ByteArrayOutputStream(4)
+        fun flushBytes() {
+            if (pendingBytes.size() > 0) {
+                out.append(String(pendingBytes.toByteArray(), Charsets.UTF_8))
+                pendingBytes.reset()
+            }
+        }
         var i = 0
         while (i < segment.length) {
             val c = segment[i]
-            if (c == '%' && i + 2 < segment.length + 1 && i + 2 <= segment.length) {
-                val hex = segment.substring(i + 1, minOf(i + 3, segment.length))
+            if (c == '%' && i + 2 < segment.length) {
+                val hex = segment.substring(i + 1, i + 3)
                 val decoded = hex.toIntOrNull(16)
-                if (decoded != null && hex.length == 2) {
-                    out.append(decoded.toChar())
+                if (decoded != null) {
+                    pendingBytes.write(decoded)
                     i += 3
                     continue
                 }
             }
+            flushBytes()
             out.append(c)
             i++
         }
+        flushBytes()
         return out.toString()
     }
 

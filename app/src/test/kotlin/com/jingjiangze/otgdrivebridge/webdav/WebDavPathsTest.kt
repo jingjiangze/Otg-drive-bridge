@@ -17,8 +17,15 @@ class WebDavPathsTest {
     fun `root and empty paths normalise to no segments`() {
         assertEquals(emptyList<String>(), WebDavPaths.normalize("/"))
         assertEquals(emptyList<String>(), WebDavPaths.normalize(""))
-        assertEquals(emptyList<String>(), WebDavPaths.normalize(null))
         assertTrue(WebDavPaths.isRoot("/"))
+    }
+
+    @Test
+    fun `a null path is rejected rather than read as the root`() {
+        // Fail closed: the shared root must not be served just because the path
+        // is missing, so null stays null and isRoot stays false.
+        assertNull(WebDavPaths.normalize(null))
+        assertFalse(WebDavPaths.isRoot(null))
     }
 
     @Test

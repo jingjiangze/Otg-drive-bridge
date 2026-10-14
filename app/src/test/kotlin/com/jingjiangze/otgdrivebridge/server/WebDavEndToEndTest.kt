@@ -348,7 +348,7 @@ class WebDavEndToEndTest {
         }
         if (probe.status != HttpStatusCode.Unauthorized) return probe
 
-        val challenge = DigestAuthenticator.parseHeader(probe.headers["WWW-Authenticate"])
+        val challenge = DigestAuthenticator.parseChallenge(probe.headers["WWW-Authenticate"])
             ?: error("no usable digest challenge")
         val cnonce = "abcdef012345"
         val nc = "00000001"
