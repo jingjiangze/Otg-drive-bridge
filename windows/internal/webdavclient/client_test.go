@@ -58,6 +58,17 @@ type fakeServer struct {
 	// realmOverride answers a challenge with a different realm, which the client
 	// must refuse rather than answer.
 	realmOverride string
+	// stableNonce is the nonce this server currently hands out.
+	//
+	// A real server reuses one nonce across many requests and only rotates it on
+	// expiry or restart — the Kotlin DigestAuthenticator keeps a tracker per
+	// nonce and accepts an increasing nc under it. Minting a fresh nonce on every
+	// 401 instead would make nc unusable as a replay counter: the client resets
+	// its count on each new nonce, so every request would carry 00000001 and a
+	// replay of any request would be indistinguishable from a new one.
+	stableNonce string
+	// stableOpaque is the opaque paired with stableNonce.
+	stableOpaque string
 
 	lastSeen map[string]http.Header
 }
@@ -159,6 +170,15 @@ func (f *fakeServer) authorize(w http.ResponseWriter, r *http.Request) bool {
 	// flag here keeps it a one-shot: the request after the retry must succeed.
 	invalidated := f.forceStale
 	f.forceStale = false
+	// Rotate only when the previous nonce was dropped. Every other 401 — the
+	// ordinary handshake the client performs before its first authorized
+	// request — reuses the nonce it already issued, which is what lets the
+	// client's nonce-count climb instead of restarting at 1 forever.
+	if invalidated || f.stableNonce == "" {
+		f.stableNonce = fmt.Sprintf("nonce-%d", time.Now().UnixNano())
+		f.stableOpaque = fmt.Sprintf("opaque-%d", time.Now().UnixNano()%100000)
+	}
+	nonce, opaque := f.stableNonce, f.stableOpaque
 	f.mu.Unlock()
 
 	ok := f.verifyDigest(header, r.Method)
@@ -166,8 +186,6 @@ func (f *fakeServer) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	nonce := fmt.Sprintf("nonce-%d", time.Now().UnixNano())
-	opaque := fmt.Sprintf("opaque-%d", time.Now().UnixNano()%100000)
 	challenge := fmt.Sprintf(`Digest realm=%q, qop="auth", nonce=%q, opaque=%q`, realm, nonce, opaque)
 	if invalidated {
 		challenge += ", stale=true"
@@ -445,14 +463,23 @@ func (f *fakeServer) handleCopyOrMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "400 Missing Destination", http.StatusBadRequest)
 		return
 	}
-	// WebDavRequestHandler strips a scheme and takes everything after the first
-	// slash, defaulting to "/" when there is none. Written as a guard rather
-	// than SplitN(...)[1] so a bare relative Destination cannot panic the
-	// server goroutine — which would fail the whole test binary, not the case.
+	// WebDavRequestHandler strips the scheme first and only then takes
+	// everything after the first slash, defaulting to "/" when there is none:
+	//
+	//   destPath.substringBefore('?')
+	//     .let { if (it.startsWith("http://") || it.startsWith("https://"))
+	//              it.substringAfter("://").substringAfter('/', "/") else it }
+	//
+	// Searching for the first '/' in the *raw* header would find the one inside
+	// "://" and leave "//127.0.0.1:1234/dst.txt", whose parent is a hostname —
+	// a 409 for every absolute Destination. Written as a guard rather than
+	// SplitN(...)[1] so a bare relative Destination cannot panic the server
+	// goroutine, which would fail the whole test binary, not the case.
 	destPath := strings.SplitN(dest, "?", 2)[0]
 	if strings.HasPrefix(destPath, "http://") || strings.HasPrefix(destPath, "https://") {
-		if slash := strings.IndexByte(destPath, '/'); slash >= 0 {
-			destPath = destPath[slash:]
+		rest := destPath[strings.Index(destPath, "://")+3:]
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			destPath = rest[slash:]
 		} else {
 			destPath = "/"
 		}

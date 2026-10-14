@@ -345,6 +345,9 @@ func (s *Server) Propfind(ctx context.Context, path, depth string) ([]Node, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMultiStatus {
+		// ParseError closes too; the deferred close is then a no-op. Keeping it
+		// means the success path below has one owner, and the error path is not
+		// the only one that has to remember to close.
 		return nil, ParseError(resp)
 	}
 	return parseMultistatus(resp.Body)
@@ -363,7 +366,7 @@ func (s *Server) Get(ctx context.Context, path string) (io.ReadCloser, int64, ht
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		// ParseError reads and closes the body; do not close it here first.
 		return nil, 0, nil, ParseError(resp)
 	}
 	return resp.Body, resp.ContentLength, resp.Header, nil
@@ -376,7 +379,7 @@ func (s *Server) Head(ctx context.Context, path string) (*http.Response, error) 
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		// ParseError reads and closes the body; do not close it here first.
 		return resp, ParseError(resp)
 	}
 	return resp, nil
@@ -448,8 +451,11 @@ func (d DestinationStyle) String() string {
 // MoveOrCopy renames or copies [path] to [destination].
 //
 // destination is a server-relative path, percent-encoded exactly like the one
-// used for the request URI. overwrite maps to the Overwrite header, which the
-// server currently ignores; see the package comment for gap 4.
+// used for the request URI. overwrite maps to the Overwrite header, whose value
+// is the single letter "T" or "F" per RFC 4918 §10.6 — not "true"/"false". The
+// server currently ignores it either way, but a server that starts enforcing it
+// rejects an unrecognised value, and the failure would look like a permissions
+// problem rather than a spelling one.
 func (s *Server) MoveOrCopy(ctx context.Context, method, path, destination string, overwrite bool, style DestinationStyle) (*http.Response, error) {
 	dest := destination
 	switch style {
@@ -460,9 +466,13 @@ func (s *Server) MoveOrCopy(ctx context.Context, method, path, destination strin
 	case DestCustom:
 		// Used verbatim.
 	}
+	overwriteHeader := "F"
+	if overwrite {
+		overwriteHeader = "T"
+	}
 	return s.Do(ctx, method, path, nil, map[string]string{
 		"Destination": dest,
-		"Overwrite":   strconv.FormatBool(overwrite),
+		"Overwrite":   overwriteHeader,
 	})
 }
 
@@ -482,7 +492,9 @@ func (s *Server) Lock(ctx context.Context, path string) (string, *http.Response,
 		return "", nil, err
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		defer resp.Body.Close()
+		// No defer here: ParseError closes the body, and on the success path the
+		// caller owns the response (the lock token is read from its headers and
+		// the body is the caller's to consume).
 		return "", resp, ParseError(resp)
 	}
 	token := strings.Trim(resp.Header.Get("Lock-Token"), "<> ")
@@ -535,8 +547,9 @@ func (s *Server) Proppatch(ctx context.Context, path string, props map[string]st
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMultiStatus {
+		// ParseError reads and closes the body. On the success path the caller
+		// owns the response and closes it itself.
 		return nil, resp, ParseError(resp)
 	}
 	nodes, err := parseMultistatus(resp.Body)
@@ -574,7 +587,13 @@ func escapeXML(s string) string {
 
 // --- errors ----------------------------------------------------------------
 
-// ParseError reads a response body into an error.
+// ParseError reads a response body into an error, and closes the body.
+//
+// It closes because every caller that has reached this point is done with the
+// response, and a caller that closes first would leave nothing to read — the
+// body is the message. Handing back a closed response and an error built from
+// an empty body is how "409 Conflict" ends up where "<D:no-conflicting-lock/>"
+// belongs.
 //
 // This server answers every failure with a short plain-text reason phrase
 // (WebDavRequestHandler.respondText), not with a DAV `<error>` XML document.
@@ -582,6 +601,7 @@ func escapeXML(s string) string {
 // body is still parsed when one is present, so the client keeps working if the
 // server ever moves to RFC 4918 §11-style errors.
 func ParseError(resp *http.Response) error {
+	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	text := strings.TrimSpace(string(body))
 	if strings.HasPrefix(text, "<?xml") {
