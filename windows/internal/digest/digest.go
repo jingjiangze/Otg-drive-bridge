@@ -72,7 +72,7 @@ func ParseChallenge(value string) (Challenge, bool) {
 		Nonce:  nonce,
 		Opaque: fields["opaque"],
 		Qop:    fields["qop"],
-		Stale: strings.EqualFold(fields["stale"], "true"),
+		Stale:  strings.EqualFold(fields["stale"], "true"),
 	}
 	return c, true
 }
@@ -164,12 +164,12 @@ type Client struct {
 	Password string
 	Realm    string
 
-	mu       sync.Mutex
-	nonce    string
-	opaque   string
-	qop      string
-	nc       uint64
-	cnonce   string
+	mu     sync.Mutex
+	nonce  string
+	opaque string
+	qop    string
+	nc     uint64
+	cnonce string
 }
 
 // NewClient returns a client that answers challenges for [realm].

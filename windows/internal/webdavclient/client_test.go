@@ -68,7 +68,7 @@ type authRecord struct {
 	nc      string
 	nonce   string
 	opaque  string
-	cnonce string
+	cnonce  string
 	qop     string
 	present bool
 }
@@ -475,7 +475,7 @@ func (f *fakeServer) handleCopyOrMove(w http.ResponseWriter, r *http.Request) {
 	if slash := strings.LastIndexByte(strings.TrimSuffix(destPath, "/"), '/'); slash > 0 {
 		parent = destPath[:slash]
 	}
-	if parent != "/" && !f.isDirLocked(parent + "/") {
+	if parent != "/" && !f.isDirLocked(parent+"/") {
 		f.mu.Unlock()
 		http.Error(w, "409 Destination missing", http.StatusConflict)
 		return

@@ -12,19 +12,19 @@
 //
 //  1. stale re-challenge      Do(): one bounded retry on 401, digest.Client.Use
 //  2. opaque mismatch         Do() re-challenges; Client echoes the current
-//                             opaque rather than caching a header
+//     opaque rather than caching a header
 //  3. relative Destination    DestinationStyle — absolute, relative, or custom
 //  4. Overwrite: F → 412      DestinationStyle carries it; the server ignores it
-//                             today (WebDavRequestHandler.handleCopyOrMove
-//                             never reads the header), which is recorded in
-//                             findings.md as a Stage-3 server fix
+//     today (WebDavRequestHandler.handleCopyOrMove
+//     never reads the header), which is recorded in
+//     findings.md as a Stage-3 server fix
 //  5. Depth                   Propfind always sends it explicitly
 //  6. PROPPATCH               BuildProppatch; the server answers 207 with the
-//                             current values and applies nothing
+//     current values and applies nothing
 //  7. error XML shape         ParseError reads this server's plain-text bodies
-//                             and a DAV XML <error> if one ever arrives
+//     and a DAV XML <error> if one ever arrives
 //  8. ETag / If-Match         Put sends If-Match; the server ignores it on PUT
-//                             but does emit an ETag on GET/HEAD
+//     but does emit an ETag on GET/HEAD
 //  9. 100-continue            Transport.ExpectContinueTimeout; see PutStream
 //
 // Everything below is written against the server as it is, not as RFC 4918

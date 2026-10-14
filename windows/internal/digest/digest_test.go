@@ -104,8 +104,8 @@ func TestParseChallengeRejectsNonDigestValues(t *testing.T) {
 		"",
 		"Basic realm=\"x\"",
 		"Bearer token",
-		`Digest qop="auth", nonce="n"`,     // no realm
-		`Digest realm="r", qop="auth"`,    // no nonce
+		`Digest qop="auth", nonce="n"`, // no realm
+		`Digest realm="r", qop="auth"`, // no nonce
 	} {
 		if _, ok := ParseChallenge(value); ok {
 			t.Errorf("ParseChallenge accepted %q", value)
