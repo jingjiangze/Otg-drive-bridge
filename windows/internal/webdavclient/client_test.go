@@ -609,17 +609,27 @@ func TestChallengeIsAnsweredTransparently(t *testing.T) {
 	f := newFakeServer(t)
 	f.putFile("/hello.txt", []byte("hello"))
 
-	resp, err := f.client.Get(context.Background(), "/hello.txt")
+	body, length, header, err := f.client.Get(context.Background(), "/hello.txt")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	defer resp.Close()
-	body, err := io.ReadAll(resp)
+	defer body.Close()
+	got, err := io.ReadAll(body)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if string(body) != "hello" {
-		t.Errorf("body = %q, want %q", body, "hello")
+	if string(got) != "hello" {
+		t.Errorf("body = %q, want %q", got, "hello")
+	}
+	// Get passes ContentLength through as the server declared it. -1 means the
+	// server did not declare one (chunked), which is not a client bug — the real
+	// server sends Content-Length on every GET, but this fake does not set it
+	// explicitly, so only assert when the value is meaningful.
+	if length >= 0 && length != int64(len(got)) {
+		t.Errorf("length = %d, want %d", length, len(got))
+	}
+	if header.Get("ETag") == "" {
+		t.Error("no ETag; Get exposes the response headers and the server sends one")
 	}
 	if got := f.client.Client.NonceCount(); got != 1 {
 		t.Errorf("nonce count = %d, want 1", got)
