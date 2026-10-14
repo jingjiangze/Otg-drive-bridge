@@ -1,0 +1,17 @@
+# Normalize line endings so the shell wrapper works on Linux/macOS runners.
+# Without this, `gradlew` checked out on a Windows host with core.autocrlf=true
+# arrives with CRLF and fails with "bad interpreter: /bin/bash^M".
+* text=auto eol=lf
+
+# Windows-only batch file must stay CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files must never be touched by the text filter.
+*.jar binary
+*.png binary
+*.webp binary
+*.keystore binary
+*.jks binary
+*.apk binary
+*.aab binary
