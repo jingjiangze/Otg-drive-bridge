@@ -3,7 +3,6 @@ package com.jingjiangze.otgdrivebridge.storage
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Environment
 import android.provider.DocumentsContract
 import androidx.activity.result.ActivityResultLauncher
 import java.io.File
@@ -25,7 +24,13 @@ import java.io.File
  */
 class TreeGrant(
     private val context: Context,
-    private val launcher: ActivityResultLauncher<Uri?>
+    /**
+     * Only needed to open the picker. The grant *checks* — [onTreePicked],
+     * [isGrantValid], [releaseGrant] — never touch it, which is why the service
+     * and the Compose screen can build a checker without an Activity result
+     * registry.
+     */
+    private val launcher: ActivityResultLauncher<Uri?>? = null
 ) {
 
     /**
@@ -34,10 +39,13 @@ class TreeGrant(
      * Android 11+ refuses to select the *root* of some removable volumes; the
      * caller must allow the user to pick a subdirectory. [initialUri] seeds the
      * picker with the removable volume so the user lands in the right place.
+     *
+     * Does nothing when this instance was built without a launcher.
      */
     fun pickTree(initialUri: Uri? = null) {
+        val target = launcher ?: return
         runCatching {
-            launcher.launch(initialUri)
+            target.launch(initialUri)
         }
     }
 
@@ -69,7 +77,7 @@ class TreeGrant(
         }
         StorageRootKind.MANAGED_PATH -> {
             val path = root.managedPath ?: return false
-            Environment.isExternalStorageManager() || File(path).canWrite()
+            hasAllFilesAccess() || File(path).canWrite()
         }
     }
 

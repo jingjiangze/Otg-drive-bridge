@@ -2,7 +2,6 @@ package com.jingjiangze.otgdrivebridge.storage
 
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
 import android.webkit.MimeTypeMap
@@ -64,18 +63,22 @@ class SafDavStorage(
 
     private val rootDocument: DocumentFile? = openRoot()
 
-    private fun openRoot(): DocumentFile? = when (root.kind) {
-        StorageRootKind.TREE_URI -> {
-            val uri = Uri.parse(root.treeUri) ?: return null
-            runCatching {
-                DocumentFile.fromTreeUri(context, uri)
-                    ?: DocumentFile.fromSingleUri(context, uri)
-            }.getOrNull()?.takeIf { it.canRead() }
-        }
-        StorageRootKind.MANAGED_PATH -> {
-            val path = root.managedPath ?: return null
-            if (!Environment.isExternalStorageManager() && !File(path).canRead()) return null
-            runCatching { DocumentFile.fromFile(File(path)) }.getOrNull()
+    // Block body (not `= when`): the early returns below are illegal in an
+    // expression-bodied function.
+    private fun openRoot(): DocumentFile? {
+        return when (root.kind) {
+            StorageRootKind.TREE_URI -> {
+                val uri = Uri.parse(root.treeUri) ?: return null
+                runCatching {
+                    DocumentFile.fromTreeUri(context, uri)
+                        ?: DocumentFile.fromSingleUri(context, uri)
+                }.getOrNull()?.takeIf { it.canRead() }
+            }
+            StorageRootKind.MANAGED_PATH -> {
+                val path = root.managedPath ?: return null
+                if (!hasAllFilesAccess() && !File(path).canRead()) return null
+                runCatching { DocumentFile.fromFile(File(path)) }.getOrNull()
+            }
         }
     }
 
@@ -84,7 +87,7 @@ class SafDavStorage(
         return runCatching { doc.canRead() }.getOrDefault(false) && when (root.kind) {
             StorageRootKind.TREE_URI -> hasPersistedPermission()
             StorageRootKind.MANAGED_PATH ->
-                Environment.isExternalStorageManager() || File(root.managedPath).canWrite()
+                hasAllFilesAccess() || File(root.managedPath).canWrite()
         }
     }
 
@@ -129,14 +132,19 @@ class SafDavStorage(
         // Native move keeps the original name; a rename falls back to copy+delete
         // because DocumentsContract has no rename verb.
         if (newName == (doc.name ?: "")) {
-            return runCatching {
+            // moveDocument has a single 4-arg overload (API 24+): it needs both
+            // the source parent and the target parent. DocumentFile supplies the
+            // former; a tree root has no parent and simply cannot be moved.
+            val sourceParent = doc.parentFile ?: return false
+            val moved = runCatching {
                 DocumentsContract.moveDocument(
                     context.contentResolver,
                     doc.uri,
-                    destDoc.uri,
-                    DocumentsContract.DOCUMENT_ID_PARENT_CHILD
+                    sourceParent.uri,
+                    destDoc.uri
                 )
-            }.getOrDefault(false)
+            }.getOrNull()
+            return moved != null
         }
         return runCatching {
             copyRecursive(doc, destDoc, newName) && doc.delete()

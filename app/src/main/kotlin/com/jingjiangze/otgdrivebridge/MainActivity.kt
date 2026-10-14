@@ -2,6 +2,7 @@ package com.jingjiangze.otgdrivebridge
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.provider.Settings
@@ -89,7 +90,7 @@ class MainActivity : ComponentActivity() {
         val picker = androidx.activity.compose.rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocumentTree()
         ) { uri: Uri? ->
-            val treeGrant = TreeGrant(context, noopLauncher())
+            val treeGrant = TreeGrant(context)
             uri?.let {
                 val picked = treeGrant.onTreePicked(it)
                 if (picked != null) {
@@ -131,12 +132,18 @@ class MainActivity : ComponentActivity() {
                             picker.launch(seed)
                         }) { Text("选择 U 盘目录（SAF）") }
                         OutlinedButton(onClick = {
-                            val intent = Intent(
-                                Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,
-                                Uri.parse("package:$packageName")
-                            )
-                            startActivity(intent)
-                            status = "请在系统设置中授予「所有文件访问权限」，然后用路径模式选择 /storage/…"
+                            // MANAGE_EXTERNAL_STORAGE and its settings screen only
+                            // exist from API 30; below that SAF is the only route.
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,
+                                    Uri.parse("package:$packageName")
+                                )
+                                startActivity(intent)
+                                status = "请在系统设置中授予「所有文件访问权限」，然后用路径模式选择 /storage/…"
+                            } else {
+                                status = "Android 11 以下没有「所有文件访问权限」，请使用左侧的 SAF 目录授权"
+                            }
                         }) { Text("全部文件访问（备用）") }
                     }
                 }
@@ -203,7 +210,7 @@ class MainActivity : ComponentActivity() {
                         val current = root
                         if (current == null) {
                             status = "请先选择 U 盘目录"
-                        } else if (!TreeGrant(context, noopLauncher()).isGrantValid(current)) {
+                        } else if (!TreeGrant(context).isGrantValid(current)) {
                             status = "授权已失效，请重新选择目录"
                         } else {
                             WebDavService.start(context)
@@ -277,13 +284,6 @@ class MainActivity : ComponentActivity() {
                 "$removable:"
             )
         }.getOrNull()
-    }
-
-    private fun noopLauncher() = object : androidx.activity.result.ActivityResultLauncher<android.net.Uri?> {
-        override fun launch(input: android.net.Uri?, transition: androidx.core.app.ActivityOptionsCompat?) = Unit
-        override val contract: androidx.activity.result.contract.ActivityResultContract<android.net.Uri?, *>
-            get() = throw UnsupportedOperationException("only used for grant checks")
-        override fun unregister() = Unit
     }
 
     @Composable

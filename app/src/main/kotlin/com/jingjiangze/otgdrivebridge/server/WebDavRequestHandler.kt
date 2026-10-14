@@ -92,7 +92,7 @@ class WebDavRequestHandler(
 
     // ---------------------------------------------------------------- methods
 
-    private fun handleOptions(call: ApplicationCall) {
+    private suspend fun handleOptions(call: ApplicationCall) {
         call.response.header("DAV", WebDavXml.DAV_HEADER)
         call.response.header("MS-Author-Via", "DAV")
         call.response.header("Allow", WebDavXml.ALLOWED_METHODS)
@@ -385,15 +385,30 @@ class WebDavRequestHandler(
         return true
     }
 
+    /**
+     * Writes a plain-text response and reports that the request was served.
+     *
+     * Two shapes exist because most call sites only carry a status code, while
+     * XML bodies need an explicit content type. Returning [Boolean] is what lets
+     * the handlers above write `return respondText(...)`: every one of those
+     * paths produces a status code, so none of them is a fall-through.
+     */
     private suspend fun respondText(
         call: ApplicationCall,
         text: String,
-        contentType: io.ktor.http.ContentType = io.ktor.http.ContentType.Text.Plain,
-        status: HttpStatusCode = HttpStatusCode.OK
-    ) {
+        status: HttpStatusCode
+    ): Boolean = respondText(call, text, io.ktor.http.ContentType.Text.Plain, status)
+
+    private suspend fun respondText(
+        call: ApplicationCall,
+        text: String,
+        contentType: io.ktor.http.ContentType,
+        status: HttpStatusCode
+    ): Boolean {
         state.status = status.value
         call.respondText(text, contentType, status)
         onCompleted?.invoke(state.method, state.path, state.username, state.status)
+        return true
     }
 
     private fun readAll(stream: java.io.InputStream): ByteArray = stream.use { it.readBytes() }

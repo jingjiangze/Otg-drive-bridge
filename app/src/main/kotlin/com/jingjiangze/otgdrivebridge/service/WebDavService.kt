@@ -68,7 +68,7 @@ class WebDavService : android.app.Service() {
         acquireWakeLock()
 
         val root = StorageRootRepository.load()
-        if (root == null || !TreeGrant(this, noopLauncher()).isGrantValid(root)) {
+        if (root == null || !TreeGrant(this).isGrantValid(root)) {
             setRunning(false)
             publish("共享根目录不可用，请在 App 中重新选择")
             stopSelf()
@@ -110,7 +110,7 @@ class WebDavService : android.app.Service() {
     fun onNetworkChanged() {
         scope.launch {
             val root = StorageRootRepository.load() ?: return@launch
-            val treeGrant = TreeGrant(this@WebDavService, noopLauncher())
+            val treeGrant = TreeGrant(this@WebDavService)
             if (!treeGrant.isGrantValid(root)) {
                 publish("U 盘授权已失效，服务已停止")
                 stopSelf()
@@ -180,13 +180,6 @@ class WebDavService : android.app.Service() {
             ).apply { description = "显示共享地址与停止按钮" }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
-    }
-
-    private fun noopLauncher() = object : androidx.activity.result.ActivityResultLauncher<android.net.Uri?> {
-        override fun launch(input: android.net.Uri?, transition: androidx.core.app.ActivityOptionsCompat?) = Unit
-        override val contract: androidx.activity.result.contract.ActivityResultContract<android.net.Uri?, *>
-            get() = throw UnsupportedOperationException("launcher not needed in the service")
-        override fun unregister() = Unit
     }
 
     companion object {

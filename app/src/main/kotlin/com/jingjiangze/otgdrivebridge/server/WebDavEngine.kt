@@ -9,6 +9,7 @@ import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.routing.handle
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,8 +19,8 @@ import kotlinx.coroutines.flow.asStateFlow
 /** Snapshot of the server's runtime state, observed by the UI. */
 data class ServerState(
     val isRunning: Boolean = false,
-    val port: Int = DEFAULT_PORT,
-    val bindAddress: String = BIND_ALL_INTERFACES,
+    val port: Int = WebDavEngine.DEFAULT_PORT,
+    val bindAddress: String = WebDavEngine.BIND_ALL_INTERFACES,
     val lanAddress: String? = null,
     val startedAtMillis: Long = 0L,
     val lastError: String? = null

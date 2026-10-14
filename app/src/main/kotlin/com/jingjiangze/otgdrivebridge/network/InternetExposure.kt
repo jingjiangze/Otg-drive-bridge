@@ -10,8 +10,9 @@ package com.jingjiangze.otgdrivebridge.network
  * This interface is the seam between the app and the mature infrastructure the
  * user asked us to reuse. Two implementations ship:
  *
- *  - [NetBirdExposure]  — `netbird expose`, which yields `https://*.proxy.<domain>`
- *                         (443 + valid certificate + optional auth) in one command.
+ *  - [NetBirdExposure]  — `netbird expose`, which yields an `https://` URL on a
+ *                         `proxy.<domain>` host (443 + valid certificate +
+ *                         optional auth) in one command.
  *  - [CloudflareTunnelExposure] — a named tunnel on the user's own domain.
  *
  * Neither is bundled as a native library: the app invokes the installed CLI

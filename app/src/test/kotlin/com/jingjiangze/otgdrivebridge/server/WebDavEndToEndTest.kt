@@ -16,6 +16,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headers
 import io.ktor.server.cio.CIO as ServerCio
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.routing.handle
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.runBlocking
