@@ -982,7 +982,13 @@ func TestXMLErrorBodyIsAlsoRead(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, fakeUser, fakePass, fakeRealm)
 
-	_, err := c.Get(context.Background(), "/x")
+	body, _, _, err := c.Get(context.Background(), "/x")
+	if body != nil {
+		body.Close()
+	}
+	if err == nil {
+		t.Fatal("Get of a conflicting resource succeeded; the client must surface the 409")
+	}
 	var se *StatusError
 	if !errors.As(err, &se) {
 		t.Fatalf("error = %v, want *StatusError", err)
@@ -1047,8 +1053,14 @@ func TestStreamingRequestIsNotSilentlyRetried(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, fakeUser, fakePass, fakeRealm)
 
-	_, err := c.Do(context.Background(), "PUT", "/a.txt",
+	// The discarded response is still a live connection; closing it lets the
+	// deferred srv.Close return instead of blocking on an outstanding request.
+	// Do returns a non-nil response only on success, so guard the close.
+	resp, err := c.Do(context.Background(), "PUT", "/a.txt",
 		strings.NewReader("payload"), map[string]string{"Content-Type": "application/octet-stream"})
+	if resp != nil {
+		resp.Body.Close()
+	}
 	if !errors.Is(err, ErrStreamingRetry) {
 		t.Fatalf("Do with a streaming body = %v, want ErrStreamingRetry", err)
 	}
@@ -1227,7 +1239,11 @@ func TestContextCancellationStopsTheRequest(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	if _, err := c.Do(ctx, "PROPFIND", "/", nil, map[string]string{"Depth": "0"}); err == nil {
+	resp, err := c.Do(ctx, "PROPFIND", "/", nil, map[string]string{"Depth": "0"})
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil {
 		t.Fatal("cancelled request returned no error")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
