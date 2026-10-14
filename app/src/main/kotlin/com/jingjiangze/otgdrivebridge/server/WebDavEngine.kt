@@ -3,7 +3,6 @@ package com.jingjiangze.otgdrivebridge.server
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
 import com.jingjiangze.otgdrivebridge.webdav.DavStorage
 import com.jingjiangze.otgdrivebridge.webdav.LockManager
-import io.ktor.http.HttpMethod
 import io.ktor.server.application.Application
 // `handle { }` is a member of Route, but the `call` property its lambda sees is
 // this extension on PipelineContext, so it has to be imported explicitly.
@@ -109,19 +108,14 @@ class WebDavEngine(
 
     private fun Application.configureModule(requestHandler: WebDavRequestHandler) {
         routing {
-            // A single catch-all route per supported method; the handler inspects
-            // the method and dispatches internally. WebDAV uses non-standard verbs
-            // (PROPFIND, MKCOL, …) so they are declared explicitly.
-            listOf(
-                HttpMethod.Options, HttpMethod.Get, HttpMethod.Head, HttpMethod.Put,
-                HttpMethod.Delete, HttpMethod.Post,
-                HttpMethod("PROPFIND"), HttpMethod("PROPPATCH"),
-                HttpMethod("MKCOL"), HttpMethod("COPY"), HttpMethod("MOVE"),
-                HttpMethod("LOCK"), HttpMethod("UNLOCK")
-            ).forEach { method ->
-                route("/{...}", method) {
-                    handle { requestHandler.handle(call) }
-                }
+            // One catch-all route with no method selector: every verb reaches the
+            // handler, which dispatches internally and answers 405 for anything
+            // it does not implement. Registering the methods one by one meant an
+            // unknown verb (TRACE, REPORT, …) never matched a route at all and
+            // Ktor answered 404, which tells a WebDAV client the resource is
+            // missing rather than the method unsupported.
+            route("/{...}") {
+                handle { requestHandler.handle(call) }
             }
         }
     }

@@ -64,16 +64,10 @@ class WebDavEndToEndTest {
         }
         server = embeddedServer(ServerCio, port = PORT, host = "127.0.0.1") {
             routing {
-                listOf(
-                    HttpMethod.Options, HttpMethod.Get, HttpMethod.Head, HttpMethod.Put,
-                    HttpMethod.Delete, HttpMethod.Post,
-                    HttpMethod("PROPFIND"), HttpMethod("PROPPATCH"),
-                    HttpMethod("MKCOL"), HttpMethod("COPY"), HttpMethod("MOVE"),
-                    HttpMethod("LOCK"), HttpMethod("UNLOCK")
-                ).forEach { method ->
-                    route("/{...}", method) {
-                        handle { handler.handle(call) }
-                    }
+                // Mirrors WebDavEngine: one method-less catch-all, so the handler
+                // owns method dispatch (and answers 405 for unknown verbs).
+                route("/{...}") {
+                    handle { handler.handle(call) }
                 }
             }
         }

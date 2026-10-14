@@ -283,16 +283,25 @@ class WebDavRequestHandler(
         val node = storage.node(segments) ?: return respondText(call, "404 Not Found", HttpStatusCode.NotFound)
 
         // RFC 4918 §10.3/§10.6: `Destination` names the *target resource*, not a
-        // directory — Windows and Explorer both send a full path. Only the
-        // trailing-slash form (".../dir/") means "into this directory".
+        // directory — Windows and Explorer both send a full path. A trailing
+        // slash is the only signal that the client means "put it inside this
+        // collection, keeping the source name".
         val destIsDirectory = destinationHeader.trimEnd().endsWith("/")
-        val destParent = if (destIsDirectory) destSegments else destSegments.dropLast(1)
+        // The collection that will *contain* the result: everything up to the
+        // last segment, or the destination itself in the trailing-slash form.
+        // (Resolving the parent-of-parent here was wrong: it put top-level
+        // destinations outside the root and renamed inside the wrong directory.)
+        val destDirSegments = if (destIsDirectory) destSegments else destSegments.dropLast(1)
         val destLeaf = if (destIsDirectory) segments.last() else destSegments.last()
-        val destinationDir = storage.parentOf(destParent)?.first ?: return respondText(
+        val destinationDir = storage.node(destDirSegments) ?: return respondText(
             call, "409 Destination missing", HttpStatusCode.Conflict
         )
-        if (!destinationDir.isDirectory) return respondText(call, "412 Destination not a collection", HttpStatusCode.PreconditionFailed)
-        if (storage.node(destSegments)?.isDirectory == true) {
+        if (!destinationDir.isDirectory) {
+            return respondText(call, "412 Destination not a collection", HttpStatusCode.PreconditionFailed)
+        }
+        // A file cannot take the place of an existing collection. In the
+        // trailing-slash form an existing collection is exactly what we want.
+        if (!destIsDirectory && storage.node(destSegments)?.isDirectory == true) {
             return respondText(call, "412 Destination is a collection", HttpStatusCode.PreconditionFailed)
         }
 
