@@ -9,6 +9,24 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
+ * A ProcessRunner with canned output.
+ *
+ * File-level (not nested in a test class): `NetBirdExposureTest` below uses it
+ * too, and a `private` class nested in another test class is not visible there.
+ */
+private class FakeRunner(
+    private val version: String = "netbird version 0.99.0",
+    private val exposeOutput: String = "URL: https://myapp-a1b2c3.proxy.example.com"
+) : ProcessRunner {
+    override suspend fun run(command: List<String>, env: Map<String, String>): ProcessResult =
+        when {
+            command.contains("version") -> ProcessResult(0, version, "")
+            command.contains("expose") -> ProcessResult(0, exposeOutput, "")
+            else -> ProcessResult(0, "", "")
+        }
+}
+
+/**
  * Transport selection must follow the documented priority and must never offer
  * a card whose tooling is absent.
  */
@@ -30,18 +48,6 @@ class TransportProbeUseCaseTest {
             else Result.success(PublicEndpoint(url = url, https = url.startsWith("https://")))
         override suspend fun stop() = Unit
         override val isActive: Boolean = false
-    }
-
-    private class FakeRunner(
-        private val version: String = "netbird version 0.99.0",
-        private val exposeOutput: String = "URL: https://myapp-a1b2c3.proxy.example.com"
-    ) : ProcessRunner {
-        override suspend fun run(command: List<String>, env: Map<String, String>): ProcessResult =
-            when {
-                command.contains("version") -> ProcessResult(0, version, "")
-                command.contains("expose") -> ProcessResult(0, exposeOutput, "")
-                else -> ProcessResult(0, "", "")
-            }
     }
 
     @Test
