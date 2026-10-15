@@ -112,8 +112,11 @@ class WebDavXmlTest {
         assertTrue(xml.contains("<Z:author>Ada &amp; Co</Z:author>"), xml)
         assertTrue(xml.contains("<Z:reviewed>true</Z:reviewed>"), xml)
         assertTrue(xml.contains("<D:status>HTTP/1.1 200 OK</D:status>"), xml)
-        // One propstat, not one per property.
-        assertEquals(1, Regex("<D:propstat>").findAll(xml).count())
+        // One propstat, not one per property. The element carries an xmlns
+        // declaration when the client's prefix needs binding, so the match has
+        // to accept an attribute list — a bare `<D:propstat>` would never match
+        // the correctly-emitted `<D:propstat xmlns:Z="urn:example:test">`.
+        assertEquals(1, Regex("<D:propstat[ >]").findAll(xml).count())
         // The prefix must be *bound*: an unbound `<Z:author>` is not
         // namespace-well-formed and every namespace-aware parser rejects the
         // whole multistatus, which would reintroduce the empty-listing bug.
@@ -152,26 +155,56 @@ class WebDavXmlTest {
     }
 
     @Test
-    fun `a name with no namespace is declared as the empty namespace`() {
-        // `xmlns:Z=""` is a *reachable* input, not a defensive one: the parser
-        // accepts an unprefixed namespace binding and hands back prefix `Z` with
-        // an empty URI. Emitting nothing here answered `<p0:marker>` with no
-        // declaration — an unbound prefix, which every namespace-aware parser
-        // rejects outright. Declaring the prefix as "" puts the element back in
-        // no namespace, which is where the client put it, and is distinct from a
-        // property in the empty-namespace URI.
-        val noNamespace = WebDavXml.QualifiedName("Z", "plain")
+    fun `a name with no namespace is emitted unprefixed`() {
+        // A property with no namespace has no prefix to bind, and binding one
+        // anyway is not an option: `xmlns:Z=""` is illegal — a prefixed namespace
+        // binding may not be empty, which a namespace-aware parser enforces
+        // ("带前缀的名称空间绑定不能为空", verified against Xerces). The only legal
+        // way to say "no namespace" is an unprefixed element, so the emitter must
+        // drop the `prefix:local` form for these rather than emit a document no
+        // client can parse.
+        val noNamespace = WebDavXml.QualifiedName("", "plain")
         assertEquals("", noNamespace.namespaceUri)
         assertEquals(
-            " xmlns:Z=\"\"",
+            "",
             WebDavXml.namespaceDeclarationsFor(listOf(noNamespace)),
-            "an empty namespace still needs its declaration: $noNamespace"
+            "nothing to bind when there is no prefix: $noNamespace"
         )
 
         // And it must survive into a real propstat, not just the fragment.
         val xml = WebDavXml.deadPropertiesPropstat(listOf(noNamespace to "v"))
-        assertTrue(xml.contains("xmlns:Z=\"\""), xml)
-        assertTrue(xml.contains("<Z:plain>v</Z:plain>"), xml)
+        assertTrue(xml.contains("<plain>v</plain>"), "unprefixed element: $xml")
+        assertFalse(xml.contains("xmlns:") && xml.contains("xmlns:="), "no empty prefixed binding: $xml")
+    }
+
+    @Test
+    fun `a synthesized prefix for a no-namespace property is dropped`() {
+        // The case the test above cannot reach, and the one that actually
+        // shipped broken: `WebDavRequestHandler.deadPropertiesPropstats`
+        // generates a `p0`, `p1`… prefix per distinct *namespace URI* so it can
+        // echo a URI back — a URI contains `:` and `/` and is not itself a legal
+        // prefix. For a property in no namespace that generation produces prefix
+        // `p0` with URI `""`, i.e. the illegal `xmlns:p0=""` binding, and the
+        // guard has to be keyed on the URI to catch it. Keyed on the prefix it
+        // looked correct and still emitted `<D:propstat xmlns:p0=""><p0:plain>`.
+        val synthesized = WebDavXml.QualifiedName("p0", "plain")
+        assertEquals("", synthesized.namespaceUri)
+        assertEquals("", WebDavXml.namespaceDeclarationsFor(listOf(synthesized)))
+        val xml = WebDavXml.deadPropertiesPropstat(listOf(synthesized to "v"))
+        assertTrue(xml.contains("<plain>v</plain>"), "unprefixed element: $xml")
+        assertFalse(Regex("xmlns:\\w+=\"\"").containsMatchIn(xml), "no empty binding: $xml")
+    }
+
+    @Test
+    fun `a synthesized prefix for a real namespace is still declared`() {
+        // The other half: a synthetic prefix bound to a real URI must keep its
+        // declaration, or the element is an unbound prefix and the whole
+        // multistatus is rejected — the empty-listing bug again.
+        val synthesized = WebDavXml.QualifiedName("p0", "marker").also { it.namespaceUri = "urn:example:t" }
+        assertEquals(" xmlns:p0=\"urn:example:t\"", WebDavXml.namespaceDeclarationsFor(listOf(synthesized)))
+        val xml = WebDavXml.deadPropertiesPropstat(listOf(synthesized to "v"))
+        assertTrue(xml.contains("<p0:marker>v</p0:marker>"), "prefixed element: $xml")
+        assertTrue(xml.contains("xmlns:p0=\"urn:example:t\""), "the binding must be present: $xml")
     }
 
     @Test
@@ -228,7 +261,26 @@ class WebDavXmlTest {
         // The complete set from §16. Names that circulate in tutorials but come
         // from RFC 3744 or vendor extensions must NOT be here — a conforming
         // client rejects an error body naming a condition it does not know.
-        assertEquals(7, WebDavXml.Conditions::class.java.declaredFields.size)
+        // Asserted by *name*, not by `declaredFields.size`: on a Kotlin `object`
+        // that count also includes the `INSTANCE` field the compiler generates,
+        // so the number drifts with the toolchain and the assertion stops
+        // testing the rule it was written for.
+        assertEquals(
+            setOf(
+                "LOCK_TOKEN_MATCHES_REQUEST_URI",
+                "LOCK_TOKEN_SUBMITTED",
+                "NO_CONFLICTING_LOCK",
+                "NO_EXTERNAL_ENTITIES",
+                "PRESERVED_LIVE_PROPERTIES",
+                "PROPFIND_FINITE_DEPTH",
+                "CANNOT_MODIFY_PROTECTED_PROPERTY"
+            ),
+            WebDavXml.Conditions::class.java.declaredFields
+                .filter { it.name != "INSTANCE" }
+                .map { it.name }
+                .toSet(),
+            "the §16 set is closed — every name here, and nothing else"
+        )
         listOf(
             WebDavXml.Conditions.LOCK_TOKEN_MATCHES_REQUEST_URI,
             WebDavXml.Conditions.LOCK_TOKEN_SUBMITTED,
@@ -285,8 +337,10 @@ class WebDavXmlTest {
             "the dead-property propstat must precede </D:response>: $xml"
         )
         // Exactly one response, and the propstat count is what was asked for.
+        // The extra propstat declares `xmlns:Z`, so match the open tag with an
+        // attribute list rather than the bare element.
         assertEquals(1, Regex("<D:response>").findAll(xml).count())
-        assertEquals(2, Regex("<D:propstat>").findAll(xml).count())
+        assertEquals(2, Regex("<D:propstat[ >]").findAll(xml).count())
     }
 
     @Test
@@ -305,7 +359,7 @@ class WebDavXmlTest {
 
         // No argument means no extra propstat at all — the default must not
         // inject an empty element.
-        assertEquals(3, Regex("<D:propstat>").findAll(xml).count())
+        assertEquals(3, Regex("<D:propstat[ >]").findAll(xml).count())
         assertEquals(2, Regex("<D:response>").findAll(xml).count())
     }
 

@@ -196,7 +196,7 @@ class WebDavRequestHandler(
         //   If-None-Match: *  → fail when the target already exists
         //                      (RFC 4918 §10.4 "create only if new")
         //   If-Match: <etag> → fail unless the current entity matches
-        //   If-Match: *      → always pass (the resource exists by construction)
+        //   If-Match: *      → fail unless the target already exists
         // Measured on-device: PUT ignored both headers entirely
         // (`grep If-Match app/src/main` = 0 hits) and overwrote unconditionally,
         // so two clients editing the same document silently dropped the first
@@ -209,7 +209,13 @@ class WebDavRequestHandler(
             // guard above already returned when the resource does not exist, but
             // that does not smart-cast a property read.
             val current = existingEtag
-            if (wanted != "*" && (current == null || !etagMatches(wanted, current))) {
+            // RFC 7232 §3.1: `If-Match: *` means "true if the resource exists".
+            // Treating it as an unconditional pass turned a create-if-exists
+            // guard into a blind overwrite, which is the opposite of what the
+            // header asks for — and the failure mode is silent data loss.
+            if (wanted == "*") {
+                if (existing == null) return preconditionFailed(call, "resource does not exist")
+            } else if (current == null || !etagMatches(wanted, current)) {
                 return preconditionFailed(call, "ETag mismatch")
             }
         }
@@ -367,6 +373,13 @@ class WebDavRequestHandler(
         // One generated prefix per distinct namespace URI. The prefix has to
         // carry its URI back to the emitter, or it is unbound in the response —
         // see [WebDavXml.namespaceDeclarationsFor].
+        //
+        // A property in *no* namespace also reaches this line, with URI "" — and
+        // it must not be given a prefix here, because `xmlns:p0=""` is illegal
+        // XML (a prefixed binding may not be empty) and would make the whole
+        // multistatus unparseable. The emitter decides on the URI and drops the
+        // prefix for that case, so this map deliberately holds the empty URI too
+        // rather than special-casing it here: the rule lives in one place.
         val prefixByUri = HashMap<String, String>()
         var index = 0
         val pairs = stored.map { (storageKey, value) ->

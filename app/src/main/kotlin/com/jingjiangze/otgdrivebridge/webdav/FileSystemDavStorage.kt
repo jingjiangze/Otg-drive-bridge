@@ -50,26 +50,53 @@ class FileSystemDavStorage(private val root: File) : DavStorage {
 
     override fun delete(node: DavNode): Boolean = fileOf(node)?.deleteRecursively() == true
 
+    /**
+     * Moves [node] into [destination] under [newName].
+     *
+     * The caller has already applied the `Overwrite` header: `Overwrite: F` never
+     * reaches here (RFC 4918 §10.6 is answered 412 before the storage is
+     * touched), and `Overwrite: T` — which is also the default when the header is
+     * absent — means the destination *must* be replaced. Refusing when the target
+     * exists therefore turned the RFC's default behaviour into a 403, while
+     * [SafDavStorage] overwrote: the two backends disagreed on the same request,
+     * and which one answered depended on where the share happened to live.
+     *
+     * `renameTo` cannot overwrite on Windows, so the target is removed first. A
+     * failed rename after a successful delete is reported as `false` rather than
+     * silently dropped, because the caller has to be able to say so.
+     */
     override fun move(node: DavNode, destination: DavNode, newName: String): Boolean {
         val src = fileOf(node) ?: return false
         val dstDir = fileOf(destination) ?: return false
         val target = File(dstDir, newName)
-        if (target.exists()) return false
-        return src.renameTo(target)
+        if (target.exists()) {
+            if (target.canonicalPath == src.canonicalPath) return true
+            if (!target.deleteRecursively()) return false
+        }
+        if (src.renameTo(target)) return true
+        // A rename can fail across filesystems or while another handle is open.
+        // Fall back to copy+delete so a MOVE out of a temp dir still works.
+        if (!copy(node, destination, newName)) return false
+        return src.deleteRecursively()
     }
 
+    /**
+     * Copies [node] into [destination] under [newName], replacing whatever is
+     * already there — the `Overwrite: T` / default case, see [move].
+     */
     override fun copy(node: DavNode, destination: DavNode, newName: String): Boolean {
         val src = fileOf(node) ?: return false
         val dstDir = fileOf(destination) ?: return false
         val target = File(dstDir, newName)
-        if (target.exists()) return false
         if (src.isDirectory) {
+            if (target.exists() && !target.deleteRecursively()) return false
             if (!target.mkdirs()) return false
             src.listFiles()?.forEach { child ->
                 if (!copy(FileNode(child), FileNode(target), child.name)) return false
             }
             return true
         }
+        if (target.exists() && !target.delete()) return false
         return runCatching {
             src.copyTo(target, overwrite = false)
             true

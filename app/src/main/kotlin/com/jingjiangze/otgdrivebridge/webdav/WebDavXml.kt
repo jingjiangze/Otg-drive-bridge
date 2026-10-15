@@ -139,7 +139,11 @@ object WebDavXml {
         append("<D:propstat").append(namespaceDeclarationsFor(propNames)).append('>')
         append("<D:prop>")
         for (prop in propNames) {
-            append('<').append(prop.prefix).append(':').append(prop.local).append("/>")
+            // No namespace means no prefix — see [deadPropertiesPropstat]. The
+            // test is the URI, not the prefix, because the handler synthesizes
+            // `p0`, `p1`… per distinct URI and a synthetic prefix with an empty
+            // URI is exactly the illegal binding this must not emit.
+            append('<').append(qualifiedTagOf(prop)).append("/>")
         }
         append("</D:prop>")
         if (condition != null) {
@@ -172,12 +176,36 @@ object WebDavXml {
         append("<D:propstat").append(namespaceDeclarationsFor(properties.map { it.first })).append('>')
         append("<D:prop>")
         for ((name, value) in properties) {
-            append('<').append(name.prefix).append(':').append(name.local).append('>')
+            // A property with no namespace is emitted **unprefixed**: the only
+            // way to say "no namespace" in XML is an unprefixed element with no
+            // default declaration in scope (or `xmlns=""`, which means the same
+            // thing). Emitting `<Z:plain>` with `xmlns:Z=""` looks equivalent but
+            // is not — a prefixed namespace binding may not be empty, so every
+            // namespace-aware parser rejects the document (measured: "带前缀的
+            // 名称空间绑定不能为空"). That is the empty-listing bug in a new
+            // coat: the value is stored, the readback is unparseable.
+            //
+            // The decision is made on the **namespace URI**, not the prefix: the
+            // handler synthesizes `p0`, `p1`… per distinct URI to echo a URI back
+            // (a URI contains `:` and `/` and cannot itself be a prefix), so a
+            // property in no namespace arrives here as prefix `p0` with URI `""`.
+            append('<').append(qualifiedTagOf(name)).append('>')
             append(escape(value))
-            append("</").append(name.prefix).append(':').append(name.local).append('>')
+            append("</").append(qualifiedTagOf(name)).append('>')
         }
         append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>")
     }
+
+    /**
+     * The XML tag for [name]: `prefix:local` normally, bare `local` when the
+     * property is in no namespace.
+     *
+     * Shared by every builder that emits a client-supplied name, so the
+     * "no namespace ⇒ unprefixed" rule lives in one place instead of being
+     * re-derived (and re-broken) per call site.
+     */
+    private fun qualifiedTagOf(name: QualifiedName): String =
+        if (name.namespaceUri.isEmpty()) name.local else "${name.prefix}:${name.local}"
 
     /** Wraps [propstats] for one resource into a `<D:response>`. */
     fun proppatchResponse(href: String, propstats: List<String>): String = buildString {
@@ -211,11 +239,22 @@ object WebDavXml {
      * The `DAV:` prefix is never declared here: every builder in this object
      * already emits `xmlns:D="DAV:"` on its root element.
      *
-     * A name with **no namespace URI** still needs `xmlns:Z=""` — that is what
-     * puts it in no namespace, which is a different place than the empty-namespace
-     * URI and must not be silently merged with it. `ProppatchParser` accepts
-     * `xmlns:Z=""`, so the store does hold `{}`-prefixed keys and this branch is
-     * reachable, not defensive.
+     * A name whose **namespace URI** is empty is skipped entirely here and
+     * emitted unprefixed by its builder — a prefixed binding to "" is not legal
+     * XML (a prefix may only be bound to a non-empty URI, or undeclared relative
+     * to an ancestor that bound it), so declaring one would make the response
+     * unparseable for exactly the clients this is meant to serve. No namespace is
+     * a different place from the empty-namespace URI and must not be merged with
+     * it, which the `{}` store key keeps distinct.
+     *
+     * The test is the **URI**, not the prefix: `deadPropertiesPropstats` in the
+     * request handler generates a synthetic `p0`, `p1`… prefix per distinct
+     * namespace URI precisely so that a URI — which contains `:` and `/` and is
+     * therefore not a legal prefix — can still be echoed back. For a property in
+     * no namespace that generation yields prefix `p0` with URI `""`, which is
+     * exactly the illegal binding this guard exists to prevent. (Measured: the
+     * readback emitted `<D:propstat xmlns:p0=""><p0:plain>` before the guard was
+     * keyed on the URI.) No prefix is a subset of this and stays covered.
      */
     fun namespaceDeclarationsFor(names: List<QualifiedName>): String {
         val seen = LinkedHashMap<String, String>()
@@ -226,6 +265,9 @@ object WebDavXml {
             // would then name a *different* property than the client sent. The
             // parser refuses those: `isProtected` compares URIs, not prefixes.
             if (name.prefix == "D") continue
+            // Nothing to bind when the property is in no namespace at all: see
+            // the KDoc above.
+            if (name.namespaceUri.isEmpty()) continue
             // One prefix, two URIs, is not expressible in XML. The first wins;
             // the duplicate keeps a name it can legally be read back by.
             val existing = seen[name.prefix]

@@ -383,11 +383,40 @@ class WebDavEndToEndTest {
         }
         assertEquals(HttpStatusCode.NoContent, weak.status)
 
+        // Re-read the tag: the ETag is `<lastModified>-<length>`, and the
+        // successful PUT above just changed the mtime. Sending the stale one is
+        // a genuine lost-update guard firing, which is what the server must do
+        // — but that is not what this test is about, so fetch the current tag.
+        val current = authorizedRequest("GET", "/weak.txt").headers["ETag"]!!
+        val currentBare = current.trim('"')
+
         val list = authorizedRequest("PUT", "/weak.txt") {
-            header("If-Match", "\"nomatch\", \"$bare\", \"other\"")
+            header("If-Match", "\"nomatch\", \"$currentBare\", \"other\"")
             setBody("v3")
         }
         assertEquals(HttpStatusCode.NoContent, list.status)
+    }
+
+    @Test
+    fun `if-match rejects a stale tag after the file has been rewritten`() = runBlocking {
+        // The mirror image of the test above, and the reason a comma list has to
+        // be re-fetched: once the ETag has moved on, the old value is a real
+        // precondition failure, not something to be papered over by weakening
+        // the comparison. A client that edits on top of its own stale copy must
+        // lose, otherwise the first writer's work is silently dropped.
+        authorizedRequest("PUT", "/stale.txt") { setBody("v1") }
+        val first = authorizedRequest("GET", "/stale.txt").headers["ETag"]!!
+        val firstBare = first.trim('"')
+
+        // Someone else rewrites the file.
+        authorizedRequest("PUT", "/stale.txt") { setBody("v2") }
+
+        val stale = authorizedRequest("PUT", "/stale.txt") {
+            header("If-Match", "\"nomatch\", \"$firstBare\"")
+            setBody("v3")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, stale.status)
+        assertEquals("v2", authorizedRequest("GET", "/stale.txt").bodyAsText())
     }
 
     @Test
@@ -587,11 +616,93 @@ class WebDavEndToEndTest {
 
     @Test
     fun `a property with no namespace round trips as no namespace`() = runBlocking {
-        // `xmlns:Z=""` is accepted by the parser, so `{}plain` really is stored,
-        // and the readback must declare the prefix as "" — an unbound
-        // `<p0:plain>` would make a namespace-aware parser reject the whole
-        // multistatus, silently bringing back the empty-listing bug. The local
-        // checker `_tmp/xml-wellformed-check.mjs` is what found this.
+        // The client puts the property in *no* namespace. The only way to write
+        // that in XML is an unprefixed element under `xmlns=""` — `xmlns:Z=""`
+        // is not a legal way to ask for it, because a prefix can only be
+        // undeclared relative to an ancestor that bound it (verified with a
+        // namespace-aware parser: "must not undeclare prefix"). The parser must
+        // accept the unprefixed form, which is what a real client sends.
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val patch = authorizedRequest("PROPPATCH", "/doc.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:set><D:prop><plain xmlns="">no-ns</plain></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+        assertTrue(patch.bodyAsText().contains("200 OK"), patch.bodyAsText())
+
+        val findBody = authorizedRequest("PROPFIND", "/doc.txt").bodyAsText()
+        // The property is in *no* namespace, so it comes back unprefixed — a
+        // prefixed binding to "" is illegal XML and would make the whole
+        // multistatus unparseable for exactly the clients this readback serves.
+        assertTrue(
+            Regex("<plain>no-ns</plain>").containsMatchIn(findBody),
+            "the stored value must come back: $findBody"
+        )
+        // Both spellings of the illegal binding must be absent. The obvious one
+        // is `xmlns:=""`; the one that actually reached the wire is
+        // `xmlns:p0=""`, because the handler synthesizes a `p0`, `p1`… prefix per
+        // distinct namespace URI so it can echo a URI back (a URI contains `:`
+        // and `/` and cannot itself be a prefix). For a property in no namespace
+        // that generation yields prefix `p0` with URI `""` — measured on the
+        // readback as `<D:propstat xmlns:p0=""><p0:plain>` before the emitter was
+        // keyed on the URI rather than the prefix.
+        assertFalse(
+            Regex("xmlns:[A-Za-z0-9_]+=\"\"").containsMatchIn(findBody),
+            "no empty prefixed binding: $findBody"
+        )
+        assertFalse(findBody.contains("xmlns:=\"\""), "no empty prefixed binding: $findBody")
+    }
+
+    @Test
+    fun `a no-namespace property and a real one coexist in one readback`() = runBlocking {
+        // The two together are what the single-property test above cannot show:
+        // with both present, the handler allocates one synthetic prefix per
+        // distinct namespace URI, and the no-namespace property must not consume
+        // one — otherwise it gets a binding to "" and the whole multistatus is
+        // unparseable, taking the *other* property down with it.
+        authorizedRequest("PUT", "/both.txt") { setBody("body") }
+        val patch = authorizedRequest("PROPPATCH", "/both.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>hello</Z:marker></D:prop></D:set>
+  <D:set><D:prop><plain xmlns="">no-ns</plain></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+
+        val findBody = authorizedRequest("PROPFIND", "/both.txt").bodyAsText()
+        assertTrue(
+            Regex("<plain>no-ns</plain>").containsMatchIn(findBody),
+            "no-namespace value: $findBody"
+        )
+        assertTrue(
+            Regex("<p\\d:marker>hello</p\\d:marker>").containsMatchIn(findBody),
+            "real-namespace value: $findBody"
+        )
+        assertTrue(
+            Regex("xmlns:p\\d=\"urn:example:test\"").containsMatchIn(findBody),
+            "the real URI must be declared: $findBody"
+        )
+        assertFalse(
+            Regex("xmlns:p\\d=\"\"").containsMatchIn(findBody),
+            "no synthetic prefix may bind the empty URI: $findBody"
+        )
+    }
+
+    @Test
+    fun `a proppatch that tries to undeclare a prefix is refused`() = runBlocking {
+        // `xmlns:Z=""` can only *undeclare* a prefix some ancestor bound. Using
+        // it to mean "no namespace" is malformed XML — every namespace-aware
+        // parser (Windows MiniRedir, Go's x/net/webdav, litmus) rejects the
+        // document — so a 400 here is correct and is what keeps the server from
+        // having to define behaviour for input no client can send. The legal
+        // spelling is `xmlns=""` on an unprefixed element, covered above.
         authorizedRequest("PUT", "/doc.txt") { setBody("body") }
         val patch = authorizedRequest("PROPPATCH", "/doc.txt") {
             setBody(
@@ -601,15 +712,7 @@ class WebDavEndToEndTest {
 </D:propertyupdate>"""
             )
         }
-        assertEquals(HttpStatusCode.MultiStatus, patch.status)
-        assertTrue(patch.bodyAsText().contains("200 OK"), patch.bodyAsText())
-
-        val findBody = authorizedRequest("PROPFIND", "/doc.txt").bodyAsText()
-        assertTrue(findBody.contains("xmlns:p0=\"\""), "unbound prefix: $findBody")
-        assertTrue(
-            Regex("<p0:plain>no-ns</p0:plain>").containsMatchIn(findBody),
-            "the stored value must come back: $findBody"
-        )
+        assertEquals(HttpStatusCode.BadRequest, patch.status)
     }
 
     @Test

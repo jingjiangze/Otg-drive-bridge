@@ -92,14 +92,24 @@ class ProppatchParserTest {
     }
 
     @Test
-    fun `an unprefixed property is refused`() {
-        // With no prefix there is nothing to key the property by, and a default
-        // namespace is not allowed for `D:` elements.
+    fun `an unprefixed property is stored in the empty namespace`() {
+        // An unprefixed element is how a client puts a property in *no*
+        // namespace, and it used to be refused outright — which made PROPPATCH
+        // answer 400 for every such client, so no property in the empty
+        // namespace could ever be set. The prefix is recorded as "" and the
+        // namespace URI as "", which is what keeps it distinct from a property
+        // in the empty-namespace URI (see DavPropertyStore's `{}` key).
         val xml = """<?xml version="1.0" encoding="utf-8"?>
 <D:propertyupdate xmlns:D="DAV:">
   <D:set><D:prop><author>Ada</author></D:prop></D:set>
 </D:propertyupdate>"""
-        assertNull(ProppatchParser.parse(xml))
+        val instructions = requireNotNull(ProppatchParser.parse(xml))
+        assertEquals(1, instructions.size)
+        assertEquals("author", instructions[0].name.local)
+        assertEquals("", instructions[0].name.prefix)
+        assertEquals("", instructions[0].name.namespaceUri)
+        assertEquals("Ada", instructions[0].value)
+        assertFalse(ProppatchParser.isProtected(instructions[0].name))
     }
 
     @Test

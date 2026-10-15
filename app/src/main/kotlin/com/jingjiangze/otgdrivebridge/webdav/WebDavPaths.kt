@@ -21,9 +21,14 @@ object WebDavPaths {
     /** Rejects the path; returns null. Kept as a value so callers can map it. */
     fun normalize(path: String?): List<String>? {
         if (path == null) return null
-        val trimmed = path.trim()
-        if (trimmed.isEmpty()) return emptyList()
-        val raw = trimmed.split('/')
+        // No whole-path trim(): it used to strip the trailing space of
+        // "/docs/trailing " before any segment reached isSafeSegment, so a name
+        // Windows itself refuses to resolve was accepted here and the round trip
+        // failed on the client instead of being reported. Only a path that is
+        // entirely whitespace still collapses to the shared root.
+        if (path.isEmpty()) return emptyList()
+        if (path.isBlank()) return emptyList()
+        val raw = path.split('/')
         val segments = ArrayList<String>(raw.size)
         for (piece in raw) {
             if (piece.isEmpty()) continue

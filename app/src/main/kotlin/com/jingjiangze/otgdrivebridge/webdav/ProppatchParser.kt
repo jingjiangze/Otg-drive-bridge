@@ -117,21 +117,33 @@ object ProppatchParser {
         name.namespaceUri == DAV_NS
 
     /**
-     * The prefix/local pair for [element].
+     * The prefix/local pair for [element], resolved to what it *means* rather
+     * than what it was written with.
      *
-     * A prefix is required: an unprefixed element is either in no namespace (in
-     * which case there is nothing to key it by) or in a default namespace, which
-     * WebDAV forbids for `D:` elements. Returning null makes the caller reject
-     * the instruction rather than store an unkeyable property.
+     * An **unprefixed** element is how a client puts a property in *no*
+     * namespace (`<plain xmlns="">…</plain>`), and it has to round-trip: the
+     * previous version returned null for it, which made the whole PROPPATCH
+     * answer 400, so no property in the empty namespace could ever be set. The
+     * prefix is recorded as "", and [WebDavXml.deadPropertiesPropstat] emits the
+     * property unprefixed on the way back — the `xmlns:Z=""` spelling that looks
+     * equivalent is illegal, because a prefix may only be undeclared relative to
+     * an ancestor that bound it. That malformed input still fails at the XML
+     * parse step, before this function is reached.
+     *
+     * A default namespace on a `D:` element is not a concern: the property
+     * elements are looked up by local name under `D:prop`, and their own
+     * namespace is carried in [WebDavXml.QualifiedName.namespaceUri], which is
+     * what [isProtected] compares.
      */
     private fun qualifiedNameOf(element: Element): WebDavXml.QualifiedName? {
-        val prefix = element.prefix
-        if (prefix.isNullOrBlank()) return null
         val local = element.localName ?: element.nodeName?.substringAfterLast(':') ?: return null
+        val prefix = element.prefix?.takeIf { it.isNotBlank() } ?: ""
         val qualified = WebDavXml.QualifiedName(prefix, local)
         // The namespace URI travels with the name so a later `isProtected` check
         // can compare URIs, not prefixes — the same `D:` prefix could be bound to
-        // something else in a hostile document.
+        // something else in a hostile document. An unprefixed element in a scope
+        // with no default namespace has a null namespaceURI, which is the same
+        // empty namespace as one written under `xmlns=""`.
         qualified.namespaceUri = element.namespaceURI ?: ""
         return qualified
     }
