@@ -42,12 +42,21 @@ object WebDavXml {
     /**
      * Emits a `<D:response>` entry. [href] must already be percent-encoded and
      * root-relative (starting with "/").
+     *
+     * [extraPropstats] are additional `<D:propstat>` blocks for this resource —
+     * the dead-property block a PROPFIND adds, for instance. They must arrive as
+     * *complete* `<D:propstat>...</D:propstat>` elements, because the multistatus
+     * DTD is `(response+, error?)`: a propstat after `</D:response>` is not a
+     * child of anything and makes the whole document invalid. Concatenating to
+     * the return value of this function is exactly how that happens, which is
+     * why the parameter exists instead.
      */
     fun response(
         href: String,
         node: DavNode?,
         mimeType: String,
-        includeContentLength: Boolean = true
+        includeContentLength: Boolean = true,
+        extraPropstats: List<String> = emptyList()
     ): String = buildString {
         append("<D:response><D:href>").append(escape(href)).append("</D:href>")
         append("<D:propstat><D:prop>")
@@ -69,7 +78,11 @@ object WebDavXml {
             append("<D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>")
         }
         append("<D:lockdiscovery/>")
-        append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+        append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>")
+        // Extra propstats go *before* `</D:response>`, so they are children of
+        // this response and not orphans the parser will reject.
+        extraPropstats.forEach { append(it) }
+        append("</D:response>")
     }
 
     /** Wraps [entries] in a multistatus document. */
@@ -83,21 +96,173 @@ object WebDavXml {
     /**
      * Depth 1 collection listing: the collection itself plus its children.
      * [baseHref] is the collection's encoded href (with trailing slash).
+     *
+     * [extraForCollection] are extra `<D:propstat>` blocks for the collection's
+     * own `<D:response>` — complete elements, passed in rather than concatenated
+     * to the result, because the multistatus DTD is `(response+, error?)` and
+     * anything after `</D:multistatus>` is not a child of anything.
      */
     fun collectionListing(
         baseHref: String,
         collection: DavNode,
         children: List<DavNode>,
-        mimeTypeOf: (String) -> String
+        mimeTypeOf: (String) -> String,
+        extraForCollection: List<String> = emptyList()
     ): String {
         val entries = ArrayList<String>(children.size + 1)
-        entries += response(baseHref, collection, mimeTypeOf(collection.name))
+        entries += response(baseHref, collection, mimeTypeOf(collection.name), extraPropstats = extraForCollection)
         for (child in children) {
             val childHref = baseHref + WebDavPaths.percentEncode(child.name) +
                 if (child.isDirectory) "/" else ""
             entries += response(childHref, child, mimeTypeOf(child.name))
         }
         return multistatus(entries)
+    }
+
+    /**
+     * One `<D:propstat>` block for a PROPPATCH result: the properties that share
+     * [status], listed by their qualified XML name in [propNames].
+     *
+     * A PROPPATCH response is a multistatus of these blocks, one per outcome —
+     * RFC 4918 §9.2 requires the 200 block for what was stored and a 403 block
+     * naming `cannot-modify-protected-property` for what was refused, never a
+     * single blanket status for the whole request.
+     *
+     * The client's prefixes are echoed, so their `xmlns:` bindings are declared
+     * here — see [namespaceDeclarationsFor].
+     */
+    fun proppatchPropstat(
+        propNames: List<QualifiedName>,
+        status: HttpStatus,
+        condition: String? = null
+    ): String = buildString {
+        append("<D:propstat").append(namespaceDeclarationsFor(propNames)).append('>')
+        append("<D:prop>")
+        for (prop in propNames) {
+            append('<').append(prop.prefix).append(':').append(prop.local).append("/>")
+        }
+        append("</D:prop>")
+        if (condition != null) {
+            append("<D:error><D:").append(condition).append("/></D:error>")
+        }
+        append("<D:status>HTTP/1.1 ").append(status.code).append(' ').append(status.reason)
+        append("</D:status></D:propstat>")
+    }
+
+    /**
+     * A `<D:propstat>` listing dead properties **with their values** — the shape
+     * a PROPFIND needs, as opposed to [proppatchPropstat] which lists names only
+     * because that is all a PROPPATCH *response* carries (RFC 4918 §9.2).
+     *
+     * A PROPPATCH that stores `Z:marker = hello` followed by a PROPFIND that
+     * answers `<Z:marker/>` has not actually given the client its own data
+     * back: Windows Explorer's comment column and most sync tools' bookkeeping
+     * would come up empty while the round trip *looked* successful. RFC 4918
+     * §9.1's allprop form — what a body-less PROPFIND is — returns values, so
+     * this does too.
+     *
+     * The client's own prefix is echoed back, so the `xmlns:` binding that makes
+     * it a legal name has to be declared too. [namespaceDeclarationsFor] puts it
+     * on this element, where it scopes to exactly the properties that use it —
+     * without it `<Z:marker>` is an unbound prefix and every namespace-aware
+     * parser rejects the whole multistatus, which would silently reintroduce the
+     * empty-listing bug this readback exists to fix.
+     */
+    fun deadPropertiesPropstat(properties: List<Pair<QualifiedName, String>>): String = buildString {
+        append("<D:propstat").append(namespaceDeclarationsFor(properties.map { it.first })).append('>')
+        append("<D:prop>")
+        for ((name, value) in properties) {
+            append('<').append(name.prefix).append(':').append(name.local).append('>')
+            append(escape(value))
+            append("</").append(name.prefix).append(':').append(name.local).append('>')
+        }
+        append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>")
+    }
+
+    /** Wraps [propstats] for one resource into a `<D:response>`. */
+    fun proppatchResponse(href: String, propstats: List<String>): String = buildString {
+        append("<D:response><D:href>").append(escape(href)).append("</D:href>")
+        propstats.forEach { append(it) }
+        append("</D:response>")
+    }
+
+    /** An HTTP status line's code plus reason phrase, for `<D:status>`. */
+    class HttpStatus(val code: Int, val reason: String) {
+        companion object {
+            val OK = HttpStatus(200, "OK")
+            val FORBIDDEN = HttpStatus(403, "Forbidden")
+            val CONFLICT = HttpStatus(409, "Conflict")
+        }
+    }
+
+    /**
+     * `xmlns:` declarations for the prefixes [names] actually use, as a leading
+     * `" xmlns:X=\"uri\"..."` fragment (empty when there are none to declare).
+     *
+     * A prefix is only a name once it is bound: an element `<Z:marker>` with no
+     * `xmlns:Z` anywhere in scope is not namespace-well-formed, and the parsers
+     * that matter here — Go's `x/net/webdav`, Windows' MiniRedir, litmus — all
+     * reject the document outright rather than guess the URI. Declaring on the
+     * element that uses the prefix scopes the binding to exactly the properties
+     * that need it, so two properties from different namespaces can share one
+     * propstat and a client that sends its own prefix reads back the same name
+     * it wrote.
+     *
+     * The `DAV:` prefix is never declared here: every builder in this object
+     * already emits `xmlns:D="DAV:"` on its root element.
+     *
+     * A name with **no namespace URI** still needs `xmlns:Z=""` — that is what
+     * puts it in no namespace, which is a different place than the empty-namespace
+     * URI and must not be silently merged with it. `ProppatchParser` accepts
+     * `xmlns:Z=""`, so the store does hold `{}`-prefixed keys and this branch is
+     * reachable, not defensive.
+     */
+    fun namespaceDeclarationsFor(names: List<QualifiedName>): String {
+        val seen = LinkedHashMap<String, String>()
+        for (name in names) {
+            // `D` is already bound to `DAV:` on the root element of every builder
+            // here, so declaring it again is redundant — and would be wrong if a
+            // client bound `D` to something else, because the emitted element
+            // would then name a *different* property than the client sent. The
+            // parser refuses those: `isProtected` compares URIs, not prefixes.
+            if (name.prefix == "D") continue
+            // One prefix, two URIs, is not expressible in XML. The first wins;
+            // the duplicate keeps a name it can legally be read back by.
+            val existing = seen[name.prefix]
+            if (existing == null || existing != name.namespaceUri) seen.putIfAbsent(name.prefix, name.namespaceUri)
+        }
+        if (seen.isEmpty()) return ""
+        return buildString {
+            for ((prefix, uri) in seen) {
+                append(" xmlns:").append(prefix).append("=\"").append(escape(uri)).append('"')
+            }
+        }
+    }
+
+    /**
+     * A property name split into its XML prefix and local part.
+     *
+     * The prefix is the *document's* prefix, not the namespace URI: it is what
+     * the client sent and what it will read back. Storing only the URI would
+     * force every response to invent a prefix the client never used.
+     *
+     * Identity, though, is the namespace URI — RFC 4918 §4.4 keys a dead
+     * property by `{namespace}local`, and two clients' `author` properties are
+     * different properties. [qualified] is therefore only a *storage key*, and
+     * two names collide there exactly when they share a prefix *and* local part
+     * regardless of namespace — which is why the handler stores the namespace
+     * alongside it rather than relying on this string.
+     *
+     * [namespaceUri] is a `var` so a parser can attach what it read from the
+     * document without changing the equality this class is used for (prefix +
+     * local, which is the response identity).
+     */
+    class QualifiedName(val prefix: String, val local: String) {
+        /** `prefix:local` — the key a [DavPropertyStore] stores under. */
+        val qualified: String get() = "$prefix:$local"
+
+        /** Bound namespace URI, filled in by the parser; "" when unknown. */
+        var namespaceUri: String = ""
     }
 
     /** LOCK response body. */
@@ -120,4 +285,54 @@ object WebDavXml {
 
     /** DAV compliance class advertised in OPTIONS. */
     const val DAV_HEADER = "1, 2"
+
+    /**
+     * RFC 4918 §16 condition codes — the **complete** set that document defines
+     * in the `DAV:` namespace.
+     *
+     * Everything a conforming WebDAV client knows how to parse lives here.
+     * Names that circulate in tutorials (`resource-must-be-null`,
+     * `valid-resourcetype`, `needs-privileges`, `min-ttl`,
+     * `quota-not-exceeded`, `number-of-matches-within-limits`,
+     * `valid-sync-token`) come from RFC 3744 or vendor extensions and are
+     * **not** part of RFC 4918; emitting them as if they were would make a
+     * conforming client reject the whole error body.
+     */
+    object Conditions {
+        const val LOCK_TOKEN_MATCHES_REQUEST_URI = "lock-token-matches-request-uri"
+        const val LOCK_TOKEN_SUBMITTED = "lock-token-submitted"
+        const val NO_CONFLICTING_LOCK = "no-conflicting-lock"
+        const val NO_EXTERNAL_ENTITIES = "no-external-entities"
+        const val PRESERVED_LIVE_PROPERTIES = "preserved-live-properties"
+        const val PROPFIND_FINITE_DEPTH = "propfind-finite-depth"
+        const val CANNOT_MODIFY_PROTECTED_PROPERTY = "cannot-modify-protected-property"
+    }
+
+    /**
+     * Builds an RFC 4918 §14.5 `<D:error>` body.
+     *
+     * `<!ELEMENT error ANY>` means "at least one XML element" — no bare text and
+     * no mixed content, which is exactly what the old plain-text reason phrases
+     * produced. A client that parses the body (Go's `x/net/webdav`, Windows
+     * MiniRedir and litmus all do) found nothing it understood and had to fall
+     * back to the status code alone.
+     *
+     * [conditions] are element names in the `DAV:` namespace, i.e. members of
+     * [Conditions]. An empty list is not expressible in the RFC — every
+     * `<error>` must carry at least one element — so it falls back to the
+     * custom-namespace escape hatch §16 permits for conditions it does not
+     * define, rather than inventing a `DAV:` name.
+     */
+    fun error(vararg conditions: String): String = buildString {
+        append("<?xml version=\"1.0\" encoding=\"utf-8\"?>")
+        append("<D:error xmlns:D=\"DAV:\"")
+        if (conditions.isEmpty()) append(" xmlns:Z=\"https://jingjiangze.otgdrivebridge/ns#\"")
+        append(">")
+        if (conditions.isEmpty()) {
+            append("<Z:condition-not-mapped/>")
+        } else {
+            for (condition in conditions) append("<D:").append(condition).append("/>")
+        }
+        append("</D:error>")
+    }
 }

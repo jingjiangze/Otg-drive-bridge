@@ -44,6 +44,15 @@ object WebDavPaths {
         if (segment.indexOf('/') >= 0) return false
         if (segment.indexOf('\\') >= 0) return false
         if (segment.indexOf('\u0000') >= 0) return false
+        // Windows strips trailing dots and spaces from a path component when it
+        // resolves the name, so a server that accepts them creates a file the
+        // client cannot address: `PUT /dot.` landed on disk as `con..bin` via
+        // the SAF mime-extension mangling, and the client's next GET for
+        // `/dot.` found nothing. Rejecting up front turns a silent round-trip
+        // failure into a 400 the client can report. Leading spaces are refused
+        // for the same reason — Explorer will not display such a name, and
+        // neither will a shell glob.
+        if (segment.first() == ' ' || segment.last() == '.' || segment.last() == ' ') return false
         // Windows device names would break client-side path building.
         if (WINDOWS_RESERVED.any { segment.equals(it, ignoreCase = true) }) return false
         return true
@@ -94,6 +103,20 @@ object WebDavPaths {
      */
     fun encodeHref(segments: List<String>): String =
         segments.joinToString("/", prefix = "/") { percentEncode(it) }
+
+    /**
+     * The collection href for [segments]: the encoded path plus a trailing slash,
+     * with the root collapsing to a single "/" instead of "//".
+     *
+     * The naive `encodeHref(segments) + "/"` produced `//` for the root, which
+     * Windows MiniRedir refuses to resolve as a collection — the mapped drive
+     * then shows nothing at all. Nested collections were unaffected, which is
+     * why only the root was ever reported.
+     */
+    fun encodeCollectionHref(segments: List<String>): String {
+        val base = encodeHref(segments)
+        return if (base.endsWith("/")) base else "$base/"
+    }
 
     /** Encodes a single segment, leaving unreserved characters intact. */
     fun percentEncode(segment: String): String {

@@ -299,6 +299,468 @@ class WebDavEndToEndTest {
     }
 
     @Test
+    fun `head on a collection is a 200 with no multistatus body`() = runBlocking {
+        // RFC 7231 §4.3.2: a HEAD is "identical to GET except that the server
+        // MUST NOT send a message body". It is not a PROPFIND, so answering 207
+        // with a directory listing — which is what this did before — makes every
+        // HEAD-based existence check see a "file" and the wrong length.
+        authorizedRequest("MKCOL", "/docs")
+        val head = authorizedRequest("HEAD", "/docs")
+        assertEquals(HttpStatusCode.OK, head.status)
+        assertEquals("0", head.headers["Content-Length"])
+        assertTrue(head.bodyAsText().isEmpty(), "HEAD must not carry a body")
+        assertFalse(head.bodyAsText().contains("multistatus"))
+    }
+
+    @Test
+    fun `head on a collection with children still reports zero`() = runBlocking {
+        // The length of a collection is not the sum of its children: it has no
+        // body at all, so a HEAD must declare 0 even when the listing is long.
+        authorizedRequest("MKCOL", "/docs")
+        authorizedRequest("PUT", "/docs/a.txt") { setBody("A") }
+        val head = authorizedRequest("HEAD", "/docs")
+        assertEquals(HttpStatusCode.OK, head.status)
+        assertEquals("0", head.headers["Content-Length"])
+    }
+
+    @Test
+    fun `put with a stale if-match is refused with 412`() = runBlocking {
+        authorizedRequest("PUT", "/guarded.txt") { setBody("v1") }
+        val etag = authorizedRequest("GET", "/guarded.txt").headers["ETag"]!!
+        assertTrue(etag.isNotBlank(), "GET must publish an ETag for If-Match to work at all")
+
+        val stale = authorizedRequest("PUT", "/guarded.txt") {
+            header("If-Match", "\"0-0\"")
+            setBody("v2")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, stale.status)
+        // The rejection must happen before any byte is staged, or a lost update
+        // is exactly what the client was trying to avoid.
+        assertEquals("v1", authorizedRequest("GET", "/guarded.txt").bodyAsText())
+    }
+
+    @Test
+    fun `put with a matching if-match succeeds`() = runBlocking {
+        authorizedRequest("PUT", "/guarded.txt") { setBody("v1") }
+        val etag = authorizedRequest("GET", "/guarded.txt").headers["ETag"]!!
+
+        val ok = authorizedRequest("PUT", "/guarded.txt") {
+            header("If-Match", etag)
+            setBody("v2")
+        }
+        assertEquals(HttpStatusCode.NoContent, ok.status)
+        assertEquals("v2", authorizedRequest("GET", "/guarded.txt").bodyAsText())
+    }
+
+    @Test
+    fun `put with if-match star requires the resource to exist`() = runBlocking {
+        val missing = authorizedRequest("PUT", "/nope.txt") {
+            header("If-Match", "*")
+            setBody("x")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, missing.status)
+
+        authorizedRequest("PUT", "/there.txt") { setBody("v1") }
+        val ok = authorizedRequest("PUT", "/there.txt") {
+            header("If-Match", "*")
+            setBody("v2")
+        }
+        assertEquals(HttpStatusCode.NoContent, ok.status)
+    }
+
+    @Test
+    fun `if-match accepts a weak tag and a comma separated list`() = runBlocking {
+        // RFC 7232 §2.3: a client may send W/"..." for a tag this server issued
+        // strong, and a header may carry a list. Weak comparison is the only
+        // thing that can match both.
+        authorizedRequest("PUT", "/weak.txt") { setBody("v1") }
+        val etag = authorizedRequest("GET", "/weak.txt").headers["ETag"]!!
+        val bare = etag.trim('"')
+
+        val weak = authorizedRequest("PUT", "/weak.txt") {
+            header("If-Match", "W/\"$bare\"")
+            setBody("v2")
+        }
+        assertEquals(HttpStatusCode.NoContent, weak.status)
+
+        val list = authorizedRequest("PUT", "/weak.txt") {
+            header("If-Match", "\"nomatch\", \"$bare\", \"other\"")
+            setBody("v3")
+        }
+        assertEquals(HttpStatusCode.NoContent, list.status)
+    }
+
+    @Test
+    fun `put with if-none-match star refuses to clobber`() = runBlocking {
+        // RFC 4918 §10.4: "create only if new". Without this, two clients racing
+        // to create the same file both get 201 and the second silently wins.
+        val created = authorizedRequest("PUT", "/new.txt") {
+            header("If-None-Match", "*")
+            setBody("mine")
+        }
+        assertEquals(HttpStatusCode.Created, created.status)
+
+        val refused = authorizedRequest("PUT", "/new.txt") {
+            header("If-None-Match", "*")
+            setBody("theirs")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, refused.status)
+        assertEquals("mine", authorizedRequest("GET", "/new.txt").bodyAsText())
+    }
+
+    @Test
+    fun `if-none-match star is ignored for a fresh file`() = runBlocking {
+        val created = authorizedRequest("PUT", "/fresh.txt") {
+            header("If-None-Match", "*")
+            setBody("brand new")
+        }
+        assertEquals(HttpStatusCode.Created, created.status)
+        assertEquals("brand new", authorizedRequest("GET", "/fresh.txt").bodyAsText())
+    }
+
+    @Test
+    fun `the etag put publishes is the etag get reads`() = runBlocking {
+        // Two incompatible schemes is the classic way this breaks: PUT used to
+        // answer `"<currentTimeMillis>-<written>"` while GET answered
+        // `"<lastModified>-<length>"`, so a client that cached one could never
+        // use it against the other.
+        val put = authorizedRequest("PUT", "/tagged.txt") { setBody("v1") }
+        val putEtag = put.headers["ETag"]!!
+        val getEtag = authorizedRequest("GET", "/tagged.txt").headers["ETag"]!!
+        assertEquals(putEtag, getEtag)
+
+        // And the tag must actually change on the next write, or If-Match would
+        // accept a stale client's write forever.
+        val overwrite = authorizedRequest("PUT", "/tagged.txt") { setBody("v2-longer") }
+        assertTrue(
+            overwrite.headers["ETag"]!! != putEtag,
+            "ETag did not change after a write: ${overwrite.headers["ETag"]} vs $putEtag"
+        )
+    }
+
+    @Test
+    fun `a 412 body is xml with an element in it`() = runBlocking {
+        // RFC 4918 §14.5: `<!ELEMENT error ANY>` — at least one XML element, no
+        // bare text. Go's x/net/webdav, Windows MiniRedir and litmus all parse
+        // the body; a plain-text reason phrase left them with nothing to read.
+        authorizedRequest("PUT", "/exists.txt") { setBody("v1") }
+        val refused = authorizedRequest("PUT", "/exists.txt") {
+            header("If-None-Match", "*")
+            setBody("v2")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, refused.status)
+        val body = refused.bodyAsText()
+        assertTrue(body.contains("<?xml"), body)
+        assertTrue(body.contains("<D:error"), body)
+        assertTrue(body.contains("</D:error>"), body)
+        assertTrue(Regex("<[A-Za-z]:[^>]*/>").containsMatchIn(body), "no element in $body")
+    }
+
+    @Test
+    fun `copy with overwrite f onto an existing destination is 412`() = runBlocking {
+        // RFC 4918 §10.6, and a data-loss fix rather than a nicety: Windows
+        // Explorer sends `F` precisely to ask the server not to clobber. Measured
+        // on-device: a plain COPY with `Overwrite: F` onto an existing file
+        // answered 201 and replaced it.
+        authorizedRequest("PUT", "/src.txt") { setBody("source") }
+        authorizedRequest("PUT", "/dst.txt") { setBody("do not clobber") }
+
+        val refused = authorizedRequest("COPY", "/src.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/dst.txt")
+            header("Overwrite", "F")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, refused.status)
+        assertEquals(
+            "do not clobber",
+            authorizedRequest("GET", "/dst.txt").bodyAsText(),
+            "Overwrite: F must leave the destination byte-for-byte intact"
+        )
+    }
+
+    @Test
+    fun `move with overwrite f onto an existing destination is 412`() = runBlocking {
+        authorizedRequest("PUT", "/a.txt") { setBody("a") }
+        authorizedRequest("PUT", "/b.txt") { setBody("b") }
+        val refused = authorizedRequest("MOVE", "/a.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/b.txt")
+            header("Overwrite", "F")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, refused.status)
+        assertTrue(java.io.File(root, "a.txt").exists(), "a refused MOVE must not move anything")
+        assertEquals("b", authorizedRequest("GET", "/b.txt").bodyAsText())
+    }
+
+    @Test
+    fun `copy with overwrite f onto a free destination succeeds`() = runBlocking {
+        authorizedRequest("PUT", "/src.txt") { setBody("source") }
+        val copy = authorizedRequest("COPY", "/src.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/free.txt")
+            header("Overwrite", "F")
+        }
+        assertEquals(HttpStatusCode.NoContent, copy.status)
+        assertEquals("source", authorizedRequest("GET", "/free.txt").bodyAsText())
+    }
+
+    @Test
+    fun `copy with overwrite t still replaces the destination`() = runBlocking {
+        // The default is T; making it work proves the F path is a real refusal
+        // and not a blanket "COPY is broken" regression.
+        authorizedRequest("PUT", "/src.txt") { setBody("new") }
+        authorizedRequest("PUT", "/dst.txt") { setBody("old") }
+        val copy = authorizedRequest("COPY", "/src.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/dst.txt")
+            header("Overwrite", "T")
+        }
+        assertEquals(HttpStatusCode.NoContent, copy.status)
+        assertEquals("new", authorizedRequest("GET", "/dst.txt").bodyAsText())
+    }
+
+    @Test
+    fun `a trailing dot in the request path is 400 not 201`() = runBlocking {
+        // Windows strips the trailing dot when it resolves the name, so the
+        // client would get 201 for `/dot.` and then find nothing on the next GET.
+        // Measured on-device: PUT /dot. answered 201 and created `con..bin`.
+        val response = authorizedRequest("PUT", "/dot.") { setBody("x") }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        assertFalse(java.io.File(root, "con..bin").exists())
+    }
+
+    @Test
+    fun `a 404 body is xml with an element in it`() = runBlocking {
+        val response = authorizedRequest("PROPFIND", "/missing")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("<D:error"), body)
+        assertTrue(Regex("<[A-Za-z]:[^>]*/>").containsMatchIn(body), "no element in $body")
+    }
+
+    @Test
+    fun `a 423 body names a lock condition`() = runBlocking {
+        // RFC 4918 §16: the client needs to know *which* condition failed to
+        // decide whether to retry with a lock token or give up. A bare status
+        // left every client guessing.
+        authorizedRequest("PUT", "/locked.txt") { setBody("v1") }
+        authorizedRequest("LOCK", "/locked.txt")
+        val blocked = authorizedRequest("PUT", "/locked.txt") { setBody("v2") }
+        assertEquals(HttpStatusCode.Locked, blocked.status)
+        val body = blocked.bodyAsText()
+        assertTrue(body.contains("<D:lock-token-submitted/>"), body)
+        assertTrue(body.contains("<D:no-conflicting-lock/>"), body)
+    }
+
+    @Test
+    fun `proppatch stores a dead property and propfind reads the value back`() = runBlocking {
+        // The whole point of #6: this used to answer 207 while storing nothing,
+        // so Windows Explorer's comment column and sync tools' bookkeeping were
+        // silently lost. Measured on-device: PROPPATCH a Z:marker, then PROPFIND
+        // it back — gone.
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val patch = authorizedRequest("PROPPATCH", "/doc.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>hello</Z:marker></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+        val patchBody = patch.bodyAsText()
+        assertTrue(patchBody.contains("200 OK"), patchBody)
+
+        val find = authorizedRequest("PROPFIND", "/doc.txt")
+        val findBody = find.bodyAsText()
+        // The client sent `Z` bound to `urn:example:test`, so the server answers
+        // in *that* namespace — a prefix it generates itself, because a prefix is
+        // a per-document alias and echoing the client's is optional. What matters
+        // is the namespace-qualified name and the value.
+        assertTrue(findBody.contains("xmlns:p0=\"urn:example:test\""), "unbound prefix: $findBody")
+        assertTrue(
+            Regex("<p0:marker>hello</p0:marker>").containsMatchIn(findBody),
+            "the stored value must come back: $findBody"
+        )
+        // ...and the value must be *inside* the multistatus, not appended after
+        // the closing tag where no parser will ever see it.
+        val end = findBody.lastIndexOf("</D:multistatus>")
+        val marker = findBody.indexOf("<p0:marker>hello</p0:marker>")
+        assertTrue(marker in 0 until end, "marker landed outside the multistatus")
+    }
+
+    @Test
+    fun `a property with no namespace round trips as no namespace`() = runBlocking {
+        // `xmlns:Z=""` is accepted by the parser, so `{}plain` really is stored,
+        // and the readback must declare the prefix as "" — an unbound
+        // `<p0:plain>` would make a namespace-aware parser reject the whole
+        // multistatus, silently bringing back the empty-listing bug. The local
+        // checker `_tmp/xml-wellformed-check.mjs` is what found this.
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val patch = authorizedRequest("PROPPATCH", "/doc.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="">
+  <D:set><D:prop><Z:plain>no-ns</Z:plain></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+        assertTrue(patch.bodyAsText().contains("200 OK"), patch.bodyAsText())
+
+        val findBody = authorizedRequest("PROPFIND", "/doc.txt").bodyAsText()
+        assertTrue(findBody.contains("xmlns:p0=\"\""), "unbound prefix: $findBody")
+        assertTrue(
+            Regex("<p0:plain>no-ns</p0:plain>").containsMatchIn(findBody),
+            "the stored value must come back: $findBody"
+        )
+    }
+
+    @Test
+    fun `proppatch on a directory reports the dead properties on the collection href`() = runBlocking {
+        authorizedRequest("MKCOL", "/docs")
+        val patch = authorizedRequest("PROPPATCH", "/docs") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:label>Receipts</Z:label></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+        assertTrue(patch.bodyAsText().contains("<D:href>/docs/</D:href>"), patch.bodyAsText())
+
+        val find = authorizedRequest("PROPFIND", "/docs")
+        val findBody = find.bodyAsText()
+        assertTrue(findBody.contains("<p0:label>Receipts</p0:label>"), findBody)
+        assertTrue(findBody.contains("xmlns:p0=\"urn:example:test\""), findBody)
+    }
+
+    @Test
+    fun `a dav namespaced set is refused with cannot-modify-protected-property`() = runBlocking {
+        // Live properties are computed from the file. Storing a client's value
+        // would make the next PROPFIND a lie — so this is a 403 inside the 207,
+        // not a silent acceptance and not a whole-request failure.
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val patch = authorizedRequest("PROPPATCH", "/doc.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><D:getcontentlength>99999</D:getcontentlength></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+        val body = patch.bodyAsText()
+        assertTrue(body.contains("<D:cannot-modify-protected-property/>"), body)
+        assertTrue(body.contains("403 Forbidden"), body)
+        // The live property must still tell the truth.
+        val find = authorizedRequest("PROPFIND", "/doc.txt").bodyAsText()
+        assertTrue(find.contains("<D:getcontentlength>4</D:getcontentlength>"), find)
+    }
+
+    @Test
+    fun `a mixed proppatch reports both outcomes`() = runBlocking {
+        // One request, two answers: 200 for what was stored, 403 for what was
+        // refused. A single blanket status for the whole request is what made
+        // the old implementation unfixable from the client side.
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val patch = authorizedRequest("PROPPATCH", "/doc.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>kept</Z:marker></D:prop></D:set>
+  <D:set><D:prop><D:getcontenttype>text/plain</D:getcontenttype></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.MultiStatus, patch.status)
+        val body = patch.bodyAsText()
+        // The response echoes the client's own prefix, so it must be bound.
+        assertTrue(body.contains("xmlns:Z=\"urn:example:test\""), "unbound prefix: $body")
+        assertTrue(body.contains("<Z:marker/>"), body)
+        assertTrue(body.contains("<D:getcontenttype/>"), body)
+        assertTrue(body.contains("200 OK"), body)
+        assertTrue(body.contains("403 Forbidden"), body)
+
+        val find = authorizedRequest("PROPFIND", "/doc.txt").bodyAsText()
+        assertTrue(find.contains("<p0:marker>kept</p0:marker>"), find)
+    }
+
+    @Test
+    fun `proppatch remove drops the property again`() = runBlocking {
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val set = """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>here</Z:marker></D:prop></D:set>
+</D:propertyupdate>"""
+        authorizedRequest("PROPPATCH", "/doc.txt") { setBody(set) }
+        val stored = authorizedRequest("PROPFIND", "/doc.txt").bodyAsText()
+        assertTrue(stored.contains("<p0:marker>here</p0:marker>"), stored)
+
+        val remove = """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:remove><D:prop><Z:marker/></D:prop></D:remove>
+</D:propertyupdate>"""
+        assertEquals(HttpStatusCode.MultiStatus, authorizedRequest("PROPPATCH", "/doc.txt") { setBody(remove) }.status)
+        assertFalse(authorizedRequest("PROPFIND", "/doc.txt").bodyAsText().contains("marker>here"))
+    }
+
+    @Test
+    fun `a malformed proppatch body is 400`() = runBlocking {
+        authorizedRequest("PUT", "/doc.txt") { setBody("body") }
+        val response = authorizedRequest("PROPPATCH", "/doc.txt") { setBody("<not-a-propertyupdate/>") }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `proppatch on a missing resource is 404`() = runBlocking {
+        val response = authorizedRequest("PROPPATCH", "/nope.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>x</Z:marker></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `dead properties are scoped to one resource`() = runBlocking {
+        // A property set on one file must not leak into a sibling's listing —
+        // that is how a store keyed by name alone turns into cross-client
+        // metadata bleed.
+        authorizedRequest("PUT", "/a.txt") { setBody("A") }
+        authorizedRequest("PUT", "/b.txt") { setBody("B") }
+        authorizedRequest("PROPPATCH", "/a.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>only-a</Z:marker></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        assertTrue(authorizedRequest("PROPFIND", "/a.txt").bodyAsText().contains("<p0:marker>only-a</p0:marker>"))
+        assertFalse(authorizedRequest("PROPFIND", "/b.txt").bodyAsText().contains("marker>only-a"))
+    }
+
+    @Test
+    fun `the root listing does not repeat a child's dead properties`() = runBlocking {
+        // Only the resource's own properties belong in its own response; echoing
+        // a child's into the parent's listing would make a directory of 500
+        // files carry 500 extra propstats.
+        authorizedRequest("PUT", "/a.txt") { setBody("A") }
+        authorizedRequest("PROPPATCH", "/a.txt") {
+            setBody(
+                """<?xml version="1.0" encoding="utf-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
+  <D:set><D:prop><Z:marker>child-only</Z:marker></D:prop></D:set>
+</D:propertyupdate>"""
+            )
+        }
+        val rootListing = authorizedRequest("PROPFIND", "/").bodyAsText()
+        assertFalse(rootListing.contains("marker>child-only"), rootListing)
+        assertTrue(rootListing.contains("/a.txt"))
+    }
+
+    @Test
     fun `utf-8 filenames round trip`() = runBlocking {
         val put = authorizedRequest("PUT", "/%E4%B8%AD%E6%96%87%E6%96%87%E4%BB%B6.txt") { setBody("内容") }
         assertEquals(HttpStatusCode.Created, put.status)

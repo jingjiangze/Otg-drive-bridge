@@ -84,4 +84,36 @@ class WebDavPathsTest {
         assertEquals("txt", WebDavPaths.extensionOf("A.TXT"))
         assertEquals("", WebDavPaths.extensionOf("noext"))
     }
+
+    @Test
+    fun `trailing dots and spaces are rejected`() {
+        // Windows strips trailing dots/spaces from a path component when it
+        // resolves a name, so a server that accepts them creates a file the
+        // client cannot address: `PUT /dot.` landed on disk as `con..bin` via the
+        // SAF mime-extension mangling, and the next GET for `/dot.` found nothing.
+        // Rejecting turns a silent round-trip failure into a 400 the client can
+        // report. Measured on-device (emulator-5554): PUT /dot. answered 201.
+        assertFalse(WebDavPaths.isSafeSegment("dot."))
+        assertFalse(WebDavPaths.isSafeSegment("dot. "))
+        assertFalse(WebDavPaths.isSafeSegment("dot "))
+        assertFalse(WebDavPaths.isSafeSegment("."))
+        assertNull(WebDavPaths.normalize("/dot."))
+        assertNull(WebDavPaths.normalize("/docs/trailing "))
+    }
+
+    @Test
+    fun `leading spaces are rejected`() {
+        // Explorer will not display such a name and neither will a shell glob.
+        assertFalse(WebDavPaths.isSafeSegment(" leading"))
+        assertNull(WebDavPaths.normalize("/%20leading"))
+    }
+
+    @Test
+    fun `ordinary dots and spaces inside a name survive`() {
+        // The rejection is about the *edges* only — a file called
+        // "my report (final).txt" is perfectly ordinary.
+        assertTrue(WebDavPaths.isSafeSegment("my report (final).txt"))
+        assertTrue(WebDavPaths.isSafeSegment("a.b.c.txt"))
+        assertEquals(listOf("my report (final).txt"), WebDavPaths.normalize("/my%20report%20(final).txt"))
+    }
 }

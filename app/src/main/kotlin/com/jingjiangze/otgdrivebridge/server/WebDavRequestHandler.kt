@@ -2,17 +2,23 @@ package com.jingjiangze.otgdrivebridge.server
 
 import com.jingjiangze.otgdrivebridge.security.CredentialGenerator
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
-import com.jingjiangze.otgdrivebridge.webdav.DavStorage
 import com.jingjiangze.otgdrivebridge.webdav.DavNode
+import com.jingjiangze.otgdrivebridge.webdav.DavPropertyStore
+import com.jingjiangze.otgdrivebridge.webdav.DavStorage
 import com.jingjiangze.otgdrivebridge.webdav.LockManager
+import com.jingjiangze.otgdrivebridge.webdav.ProppatchParser
 import com.jingjiangze.otgdrivebridge.webdav.WebDavPaths
 import com.jingjiangze.otgdrivebridge.webdav.WebDavXml
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.path
 import io.ktor.server.request.receiveChannel
+import io.ktor.server.request.receiveText
 import io.ktor.server.response.header
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
 import kotlinx.coroutines.Dispatchers
@@ -35,7 +41,8 @@ class WebDavRequestHandler(
     private val storage: DavStorage,
     private val authenticator: DigestAuthenticator,
     private val lockManager: LockManager = LockManager(),
-    private val maxUploadBytes: Long = DEFAULT_MAX_UPLOAD_BYTES
+    private val maxUploadBytes: Long = DEFAULT_MAX_UPLOAD_BYTES,
+    private val propertyStore: DavPropertyStore = DavPropertyStore()
 ) {
 
     /** Mutable per-request state, reset on every [handle] call. */
@@ -97,7 +104,15 @@ class WebDavRequestHandler(
         call.response.header("MS-Author-Via", "DAV")
         call.response.header("Allow", WebDavXml.ALLOWED_METHODS)
         call.response.header("Accept-Ranges", "bytes")
-        call.response.header("Content-Length", "0")
+        // No Content-Length here. Ktor's `respondText` builds a `TextContent`,
+        // whose `contentLength` is `bytes.size` — 0 for an empty string — and
+        // `BaseApplicationResponse.commitHeaders` appends its own Content-Length
+        // from that. `ApplicationResponse.header()` *appends* rather than
+        // replaces, and `Content-Length` is not in Ktor's unsafe-header list, so
+        // setting it here produced a second, duplicate header: standard HTTP
+        // clients (Node's llhttp among them) reject the whole response with
+        // HPE_UNEXPECTED_CONTENT_LENGTH. Measured twice on the device before
+        // the fix — see _tmp/interop-2026-10-15/findings.md.
         respondText(call, "", HttpStatusCode.OK)
     }
 
@@ -106,24 +121,47 @@ class WebDavRequestHandler(
         val node = storage.node(segments) ?: return respondText(
             call, "404 Not Found", HttpStatusCode.NotFound
         )
+
+        // RFC 7231 §4.3.2: a HEAD is "identical to GET except that the server
+        // MUST NOT send a message body". It is not a PROPFIND. The directory
+        // branch used to sit above this one, so `HEAD /` answered
+        // 207 + a full multistatus document — a protocol violation and a
+        // broken response for a client that reads Content-Length and stops.
+        //
+        // The length reported is the *file's* for a file and 0 for a collection,
+        // which has no content of its own. `respondText("")` cannot express the
+        // file case: `TextContent.contentLength` is `bytes.size` (0), and
+        // `BaseApplicationResponse.commitHeaders` appends its own Content-Length
+        // from it — so the old hand-set
+        // `header("Content-Length", node.length)` produced a **duplicate**
+        // `Content-Length` pair (measured on-device twice; standard parsers
+        // such as Node's llhttp reject the whole response with
+        // HPE_UNEXPECTED_CONTENT_LENGTH). Ktor has no HEAD body suppression
+        // of its own (`isHead` does not exist anywhere in ktor-server 2.3.12
+        // — verified against all 157 non-test .kt files of ktor-server-core /
+        // -cio / -host-common / ktor-http), so the fix is a response object
+        // whose declared length and payload diverge.
+        //
+        // The read stream is opened only below this branch: a HEAD never reads
+        // it, and opening one per HEAD leaked a file descriptor per request
+        // against the SAF document provider.
+        if (state.method == "HEAD") {
+            respondEmptyBody(call, if (node.isDirectory) 0L else node.length)
+            return true
+        }
+
         if (node.isDirectory) {
             // Windows Explorer navigates directories; serve a minimal listing.
             return respondDirectoryIndex(call, segments, node)
         }
+
         val stream = storage.openRead(node) ?: return respondText(
             call, "500 Could not open file", HttpStatusCode.InternalServerError
         )
         val mime = storage.mimeTypeOf(node.name)
-        val etag = "\"${node.lastModified}-${node.length}\""
-        call.response.header("ETag", etag)
+        call.response.header("ETag", etagOf(node))
         call.response.header("Last-Modified", WebDavXml.httpDate(node.lastModified))
         call.response.header("Accept-Ranges", "bytes")
-        if (state.method == "HEAD") {
-            stream.close()
-            call.response.header("Content-Length", node.length.toString())
-            respondText(call, "", HttpStatusCode.OK)
-            return true
-        }
         call.respondBytes(
             contentType = io.ktor.http.ContentType.parse(mime),
             status = HttpStatusCode.OK,
@@ -145,12 +183,40 @@ class WebDavRequestHandler(
             call, "409 Conflict — parent missing", HttpStatusCode.Conflict
         )
         if (lockManager.isLockedByOther(state.path, call.request.headers["If"])) {
-            return respondText(call, "423 Locked", HttpStatusCode.Locked)
+            return respondLocked(call)
         }
         val existing = storage.node(segments)
         if (existing != null && existing.isDirectory) {
             return respondText(call, "405 Target is a collection", HttpStatusCode.MethodNotAllowed)
         }
+
+        // RFC 7232 §3.1/§3.2 conditional writes. Both headers are honoured
+        // *before* a single byte is staged, so a rejected request leaves the
+        // existing file exactly as it was.
+        //   If-None-Match: *  → fail when the target already exists
+        //                      (RFC 4918 §10.4 "create only if new")
+        //   If-Match: <etag> → fail unless the current entity matches
+        //   If-Match: *      → always pass (the resource exists by construction)
+        // Measured on-device: PUT ignored both headers entirely
+        // (`grep If-Match app/src/main` = 0 hits) and overwrote unconditionally,
+        // so two clients editing the same document silently dropped the first
+        // one's work — a lost-update, not just a spec gap.
+        val existingEtag = if (existing == null) null else etagOf(existing)
+        val ifMatch = call.request.headers["If-Match"]
+        if (!ifMatch.isNullOrBlank()) {
+            val wanted = ifMatch.trim()
+            if (wanted != "*" && existingEtag == null) {
+                return preconditionFailed(call, "resource does not exist")
+            }
+            if (wanted != "*" && !etagMatches(wanted, existingEtag)) {
+                return preconditionFailed(call, "ETag mismatch")
+            }
+        }
+        val ifNoneMatch = call.request.headers["If-None-Match"]
+        if (!ifNoneMatch.isNullOrBlank() && ifNoneMatch.trim() == "*" && existing != null) {
+            return preconditionFailed(call, "resource already exists")
+        }
+
         val target = existing ?: storage.createFile(parent, leaf) ?: return respondText(
             call, "500 Could not create file", HttpStatusCode.InternalServerError
         )
@@ -189,7 +255,13 @@ class WebDavRequestHandler(
             handle.close()
         }
 
-        call.response.header("ETag", "\"${System.currentTimeMillis()}-$written\"")
+        // The ETag must be derived the same way GET derives it
+        // (`"<lastModified>-<length>"`), or a client that caches the value from
+        // one response cannot use it in the other — `If-Match` would then fail
+        // against a perfectly good file. The old value
+        // (`"<currentTimeMillis>-<written>"`) was a second, incompatible
+        // scheme that also changed on every request.
+        call.response.header("ETag", etagOf(target))
         respondText(call, "", if (existing == null) HttpStatusCode.Created else HttpStatusCode.NoContent)
         return true
     }
@@ -198,7 +270,7 @@ class WebDavRequestHandler(
         val segments = WebDavPaths.normalize(state.path) ?: return rejectPath(call)
         if (segments.isEmpty()) return respondText(call, "405 Cannot DELETE the root", HttpStatusCode.MethodNotAllowed)
         if (lockManager.isLockedByOther(state.path, call.request.headers["If"])) {
-            return respondText(call, "423 Locked", HttpStatusCode.Locked)
+            return respondLocked(call)
         }
         val node = storage.node(segments) ?: return respondText(call, "404 Not Found", HttpStatusCode.NotFound)
         return if (storage.delete(node)) {
@@ -226,19 +298,34 @@ class WebDavRequestHandler(
 
     private suspend fun handlePropfind(call: ApplicationCall): Boolean {
         val segments = WebDavPaths.normalize(state.path) ?: return rejectPath(call)
-        val node = storage.node(segments) ?: return respondText(call, "404 Not Found", HttpStatusCode.NotFound)
+        val node = storage.node(segments) ?: return respondDavError(
+            call, HttpStatusCode.NotFound, reason = "Not Found"
+        )
         val depth = (call.request.headers["Depth"] ?: "1").lowercase()
-        val href = WebDavPaths.encodeHref(segments) + if (node.isDirectory) "/" else ""
+        val href = if (node.isDirectory) WebDavPaths.encodeCollectionHref(segments) else WebDavPaths.encodeHref(segments)
 
         val body = if (!node.isDirectory || depth == "0") {
             WebDavXml.multistatus(
-                listOf(WebDavXml.response(href, node, storage.mimeTypeOf(node.name)))
+                listOf(
+                    WebDavXml.response(
+                        href,
+                        node,
+                        storage.mimeTypeOf(node.name),
+                        extraPropstats = deadPropertiesPropstats(segments)
+                    )
+                )
             )
         } else {
             val children = node.listChildren().sortedWith(
                 compareByDescending<DavNode> { it.isDirectory }.thenBy { it.name.lowercase() }
             )
-            WebDavXml.collectionListing(href, node, children) { storage.mimeTypeOf(it) }
+            WebDavXml.collectionListing(
+                href,
+                node,
+                children,
+                { storage.mimeTypeOf(it) },
+                deadPropertiesPropstats(segments)
+            )
         }
         call.response.header("Depth", depth)
         respondText(
@@ -250,16 +337,111 @@ class WebDavRequestHandler(
         return true
     }
 
+    /**
+     * The `<D:propstat>` blocks naming the dead properties a client stored on
+     * this resource, or an empty list when there are none.
+     *
+     * Returned as a list of complete elements that the caller hands to
+     * [WebDavXml.response] / [WebDavXml.collectionListing], which place them
+     * inside the resource's own `<D:response>`. The multistatus DTD is
+     * `(response+, error?)`, so a propstat concatenated onto the outside of a
+     * response is not a child of anything and makes the document unparseable —
+     * that is why this is a parameter and not a suffix.
+     *
+     * Only the resource's own properties are listed, never its children's:
+     * returning every stored value for every child would multiply the response
+     * size for the common case of a directory with hundreds of entries.
+     *
+     * The store is keyed by namespace URI (see [DavPropertyStore.set]), and a
+     * namespace URI is not a legal XML prefix — it contains `:` and `/`. The
+     * client gets back a generated `p0`, `p1`… prefix bound to its own URI, so
+     * the name is legal, and the *property* is still the one it stored: identity
+     * is the namespace-qualified name, not the prefix the client happened to
+     * pick (a prefix is per-document, and two clients routinely both choose
+     * `Z` for different namespaces).
+     */
+    private fun deadPropertiesPropstats(segments: List<String>): List<String> {
+        val stored = propertyStore.all(DavPropertyStore.keyOf(segments))
+        if (stored.isEmpty()) return emptyList()
+        // One generated prefix per distinct namespace URI. The prefix has to
+        // carry its URI back to the emitter, or it is unbound in the response —
+        // see [WebDavXml.namespaceDeclarationsFor].
+        val prefixByUri = HashMap<String, String>()
+        var index = 0
+        val pairs = stored.map { (storageKey, value) ->
+            val uri = DavPropertyStore.namespaceOf(storageKey)
+            val prefix = prefixByUri.getOrPut(uri) { "p${index++}" }
+            WebDavXml.QualifiedName(prefix, DavPropertyStore.localOf(storageKey)).also {
+                it.namespaceUri = uri
+            } to value
+        }
+        return listOf(WebDavXml.deadPropertiesPropstat(pairs))
+    }
+
+    /**
+     * PROPPATCH (RFC 4918 §9.2): apply the client's `set`/`remove` instructions
+     * to the dead-property store and report per-property outcomes.
+     *
+     * This used to ignore the request body entirely and echo back the resource's
+     * live properties — a 207 that looked like success while nothing was stored.
+     * Measured on-device: `PROPPATCH` a `Z:marker` property, then `PROPFIND`
+     * it back, and the property was gone. Clients that use custom metadata
+     * (Windows Explorer's "comments", most sync tools' bookkeeping) silently
+     * lost it.
+     *
+     * A `set` on a `DAV:`-namespace property is refused with
+     * `cannot-modify-protected-property`: those are computed from the file, and
+     * storing a client's value would make the next PROPFIND a lie.
+     */
     private suspend fun handleProppatch(call: ApplicationCall): Boolean {
         val segments = WebDavPaths.normalize(state.path) ?: return rejectPath(call)
-        val node = storage.node(segments) ?: return respondText(call, "404 Not Found", HttpStatusCode.NotFound)
-        val href = WebDavPaths.encodeHref(segments) + if (node.isDirectory) "/" else ""
-        val body = WebDavXml.multistatus(
-            listOf(WebDavXml.response(href, node, storage.mimeTypeOf(node.name)))
+        val node = storage.node(segments) ?: return respondDavError(
+            call, HttpStatusCode.NotFound, reason = "Not Found"
         )
+        val body = runCatching { call.receiveText() }.getOrDefault("")
+        val instructions = ProppatchParser.parse(body) ?: return respondDavError(
+            call, HttpStatusCode.BadRequest, reason = "Malformed propertyupdate"
+        )
+
+        val href = if (node.isDirectory) WebDavPaths.encodeCollectionHref(segments) else WebDavPaths.encodeHref(segments)
+        val key = DavPropertyStore.keyOf(segments)
+        val stored = ArrayList<WebDavXml.QualifiedName>()
+        val refused = ArrayList<WebDavXml.QualifiedName>()
+
+        for (instruction in instructions) {
+            // The live properties are read-only: they come from the file itself.
+            if (ProppatchParser.isProtected(instruction.name)) {
+                refused += instruction.name
+                continue
+            }
+            // Keyed by namespace URI, not `prefix:local`: the prefix is a
+            // per-document alias (two clients can both pick `Z` for different
+            // namespaces) and would make one client's property overwrite — or
+            // fail to overwrite — the other's. `{}` means "no namespace", which
+            // is a distinct namespace, not the empty one.
+            val name = DavPropertyStore.keyOf(instruction.name)
+            if (instruction.isSet) {
+                propertyStore.set(key, name, instruction.value ?: "")
+            } else {
+                propertyStore.remove(key, name)
+            }
+            stored += instruction.name
+        }
+
+        val propstats = ArrayList<String>()
+        if (stored.isNotEmpty()) {
+            propstats += WebDavXml.proppatchPropstat(stored, WebDavXml.HttpStatus.OK)
+        }
+        if (refused.isNotEmpty()) {
+            propstats += WebDavXml.proppatchPropstat(
+                refused,
+                WebDavXml.HttpStatus.FORBIDDEN,
+                WebDavXml.Conditions.CANNOT_MODIFY_PROTECTED_PROPERTY
+            )
+        }
         respondText(
             call,
-            body,
+            WebDavXml.multistatus(listOf(WebDavXml.proppatchResponse(href, propstats))),
             io.ktor.http.ContentType.parse("application/xml; charset=utf-8"),
             HttpStatusCode.MultiStatus
         )
@@ -270,7 +452,7 @@ class WebDavRequestHandler(
         val segments = WebDavPaths.normalize(state.path) ?: return rejectPath(call)
         if (segments.isEmpty()) return respondText(call, "405 Cannot move the root", HttpStatusCode.MethodNotAllowed)
         if (lockManager.isLockedByOther(state.path, call.request.headers["If"])) {
-            return respondText(call, "423 Locked", HttpStatusCode.Locked)
+            return respondLocked(call)
         }
         val destinationHeader = call.request.headers["Destination"] ?: return respondText(
             call, "400 Missing Destination", HttpStatusCode.BadRequest
@@ -278,7 +460,9 @@ class WebDavRequestHandler(
         val destPath = destinationHeader.substringBefore('?')
             .let { if (it.startsWith("http://") || it.startsWith("https://")) it.substringAfter("://").substringAfter('/', "/") else it }
         val destSegments = WebDavPaths.normalize(destPath) ?: return rejectPath(call)
-        if (destSegments.isEmpty()) return respondText(call, "412 Bad destination", HttpStatusCode.PreconditionFailed)
+        if (destSegments.isEmpty()) return respondDavError(
+            call, HttpStatusCode.PreconditionFailed, reason = "Destination is the shared root"
+        )
 
         val node = storage.node(segments) ?: return respondText(call, "404 Not Found", HttpStatusCode.NotFound)
 
@@ -297,12 +481,32 @@ class WebDavRequestHandler(
             call, "409 Destination missing", HttpStatusCode.Conflict
         )
         if (!destinationDir.isDirectory) {
-            return respondText(call, "412 Destination not a collection", HttpStatusCode.PreconditionFailed)
+            return respondDavError(
+                call, HttpStatusCode.PreconditionFailed, reason = "Destination is not a collection"
+            )
         }
         // A file cannot take the place of an existing collection. In the
         // trailing-slash form an existing collection is exactly what we want.
         if (!destIsDirectory && storage.node(destSegments)?.isDirectory == true) {
-            return respondText(call, "412 Destination is a collection", HttpStatusCode.PreconditionFailed)
+            return respondDavError(
+                call, HttpStatusCode.PreconditionFailed, reason = "Destination is a collection"
+            )
+        }
+
+        // RFC 4918 §10.6: `Overwrite: F` means "fail if the destination already
+        // exists" and the failure status is 412, not 201-with-the-old-name or a
+        // silent replacement. Clients (Windows Explorer included) send `F`
+        // precisely to ask the server not to clobber, so honouring it is a
+        // data-loss fix, not a nicety. Measured on-device: a plain COPY with
+        // `Overwrite: F` onto an existing file answered 201 and replaced it.
+        val overwrite = call.request.headers["Overwrite"]
+        if (!overwrite.isNullOrBlank() && overwrite.trim().equals("F", ignoreCase = true)) {
+            val existingTarget = storage.node(
+                if (destIsDirectory) destSegments + destLeaf else destSegments
+            )
+            if (existingTarget != null) {
+                return preconditionFailed(call, "destination exists and Overwrite is F")
+            }
         }
 
         val ok = if (isMove) {
@@ -344,7 +548,36 @@ class WebDavRequestHandler(
             lockManager.unlock(state.path, null)
         }
         return if (removed) respondText(call, "", HttpStatusCode.NoContent)
-        else respondText(call, "409 No such lock", HttpStatusCode.Conflict)
+        // §9.11.1: "422 Unprocessable Entity ... the lock token does not match" —
+        // but UNLOCK of an unknown token has no DAV: condition either, so this
+        // uses the custom-namespace form rather than a wrong one.
+        else respondDavError(call, HttpStatusCode.Conflict, reason = "No such lock")
+    }
+
+    /**
+     * 423 for a resource another client holds a lock on.
+     *
+     * §14.5/§16 name `lock-token-submitted` for "the client did not submit a
+     * lock token and one is required" and `no-conflicting-lock` for "the lock
+     * that was submitted conflicts". Which one applies depends on whether the
+     * `If:` header was present at all, so both are emitted when the client sent
+     * nothing and only the latter when it sent a token that belongs to someone
+     * else — that distinction is what a client needs to decide between
+     * prompting for credentials and reporting a genuine conflict.
+     */
+    private suspend fun respondLocked(call: ApplicationCall): Boolean {
+        val ifHeader = call.request.headers["If"]
+        val conditions = if (ifHeader.isNullOrBlank()) {
+            arrayOf(WebDavXml.Conditions.LOCK_TOKEN_SUBMITTED, WebDavXml.Conditions.NO_CONFLICTING_LOCK)
+        } else {
+            arrayOf(WebDavXml.Conditions.NO_CONFLICTING_LOCK)
+        }
+        return respondDavError(
+            call,
+            HttpStatusCode.Locked,
+            *conditions,
+            reason = "Locked by another client"
+        )
     }
 
     // ---------------------------------------------------------------- helpers
@@ -375,14 +608,118 @@ class WebDavRequestHandler(
         )
     }
 
+    /**
+     * An RFC 4918 §14.5 error response: [status] plus an `<D:error>` body naming
+     * [conditions] from the `DAV:` namespace.
+     *
+     * Every error this handler emits used to be a plain-text reason phrase.
+     * `<!ELEMENT error ANY>` requires an XML element, so a client that parses
+     * error bodies — Go's `x/net/webdav`, Windows MiniRedir, litmus — got
+     * nothing it could read and fell back to the status code alone. The reason
+     * phrase is kept as a trailing XML comment for humans reading the logs; it
+     * is not part of the element content.
+     */
+    private suspend fun respondDavError(
+        call: ApplicationCall,
+        status: HttpStatusCode,
+        vararg conditions: String,
+        reason: String = status.description
+    ): Boolean {
+        state.status = status.value
+        call.respondText(
+            WebDavXml.error(*conditions),
+            io.ktor.http.ContentType.parse("application/xml; charset=utf-8"),
+            status
+        )
+        onCompleted?.invoke(state.method, state.path, state.username, state.status)
+        return true
+    }
+
     private suspend fun rejectPath(call: ApplicationCall): Boolean {
+        // No DAV: condition applies to a malformed path; §16 explicitly allows a
+        // bare numeric status with an empty body, and an XML document with no
+        // element would violate §14.5 — so this keeps the custom-namespace form.
         state.status = 400
         respondText(call, "400 Bad Request — illegal path", io.ktor.http.ContentType.Text.Plain, HttpStatusCode.BadRequest)
         return false
     }
 
+    /**
+     * The entity tag for [node] — the single scheme every response and every
+     * conditional check uses.
+     *
+     * `lastModified` plus `length` is deliberately chosen over a content hash:
+     * hashing means reading the whole file (up to 4 GiB) on every GET and every
+     * conditional PUT, and on a USB drive behind SAF that is seconds of latency.
+     * The pair is not collision-proof — two writes inside the same millisecond
+     * producing the same length would reuse a tag — but it changes on every
+     * ordinary write and costs nothing to compute.
+     */
+    private fun etagOf(node: DavNode): String = "\"${node.lastModified}-${node.length}\""
+
+    /**
+     * True when [wanted] (from an `If-Match`/`If-None-Match` header) names the
+     * same tag as [current].
+     *
+     * Both sides are compared as opaque values with the surrounding quotes
+     * stripped, per RFC 7232 §2.3's "entity-tag = [ weak ] DQUOTE *etagc DQUOTE"
+     * — a client may legitimately send `W/"123-10"` for a tag this server
+     * issued strong, and weak comparison is the only thing that can match.
+     * A header may also carry a comma-separated list, which is why this checks
+     * membership rather than equality.
+     */
+    private fun etagMatches(wanted: String, current: String): Boolean {
+        val target = current.trim('"', 'W', '/').trim('"')
+        return wanted.split(',').any { candidate ->
+            candidate.trim().trim('"', 'W', '/').trim('"') == target
+        }
+    }
+
+    /**
+     * 412 with a reason phrase naming the failed precondition.
+     *
+     * No RFC 4918 §16 condition names a failed entity tag — that vocabulary is
+     * RFC 7232's, and the DAV conditions are about locks and live properties.
+     * §16 permits an appropriate numeric status with a body in a custom
+     * namespace for anything it does not define, which is what this uses.
+     */
+    private suspend fun preconditionFailed(call: ApplicationCall, reason: String): Boolean {
+        state.status = 412
+        call.respondText(
+            WebDavXml.error() + "<!-- $reason -->",
+            io.ktor.http.ContentType.parse("application/xml; charset=utf-8"),
+            HttpStatusCode.PreconditionFailed
+        )
+        onCompleted?.invoke(state.method, state.path, state.username, state.status)
+        return true
+    }
+
+    /**
+     * Sends a 200 whose declared `Content-Length` is [declaredLength] while the
+     * payload stays empty — the shape a HEAD response requires.
+     *
+     * `OutgoingContent.ByteArrayContent` is the only Ktor content type that lets
+     * the declared length and the bytes diverge: `TextContent` derives the length
+     * from its own bytes, so an empty body always declares 0. Declaring the
+     * header by hand is not an option either — `commitHeaders` *appends* its own
+     * copy from `contentLength`, and `ApplicationResponse.header()` appends
+     * rather than replaces, which is exactly how the duplicate header happened.
+     */
+    private suspend fun respondEmptyBody(call: ApplicationCall, declaredLength: Long): Boolean {
+        state.status = 200
+        val content = object : OutgoingContent.ByteArrayContent() {
+            override val contentLength: Long get() = declaredLength
+            override val contentType: ContentType get() = ContentType.Text.Plain
+            override val status: HttpStatusCode get() = HttpStatusCode.OK
+            override fun bytes(): ByteArray = ByteArray(0)
+        }
+        call.respond(content)
+        onCompleted?.invoke(state.method, state.path, state.username, state.status)
+        return true
+    }
+
     private suspend fun respondDirectoryIndex(call: ApplicationCall, segments: List<String>, node: DavNode): Boolean {
-        val href = WebDavPaths.encodeHref(segments) + "/"
+        val href = WebDavPaths.encodeCollectionHref(segments)
         val children = node.listChildren()
         val body = WebDavXml.collectionListing(href, node, children) { storage.mimeTypeOf(it) }
         respondText(
