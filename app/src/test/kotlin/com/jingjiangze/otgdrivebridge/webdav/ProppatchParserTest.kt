@@ -25,8 +25,8 @@ class ProppatchParserTest {
 
     @Test
     fun `a set instruction carries the value`() {
-        val instructions = assertNotNull(ProppatchParser.parse(body))
-        assertEquals(2, instructions!!.size)
+        val instructions = requireNotNull(ProppatchParser.parse(body))
+        assertEquals(2, instructions.size)
         val author = instructions.single { it.name.local == "author" }
         assertTrue(author.isSet)
         assertEquals("Ada", author.value)
@@ -40,8 +40,8 @@ class ProppatchParserTest {
 <D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
   <D:remove><D:prop><Z:reviewed/></D:prop></D:remove>
 </D:propertyupdate>"""
-        val instructions = assertNotNull(ProppatchParser.parse(xml))
-        assertEquals(1, instructions!!.size)
+        val instructions = requireNotNull(ProppatchParser.parse(xml))
+        assertEquals(1, instructions.size)
         assertFalse(instructions[0].isSet)
         assertNull(instructions[0].value)
     }
@@ -53,8 +53,8 @@ class ProppatchParserTest {
   <D:set><D:prop><Z:author>Ada</Z:author></D:prop></D:set>
   <D:remove><D:prop><Z:stale/></D:prop></D:remove>
 </D:propertyupdate>"""
-        val instructions = assertNotNull(ProppatchParser.parse(xml))
-        assertEquals(2, instructions!!.size)
+        val instructions = requireNotNull(ProppatchParser.parse(xml))
+        assertEquals(2, instructions.size)
         assertTrue(instructions.any { it.isSet && it.name.local == "author" })
         assertTrue(instructions.any { !it.isSet && it.name.local == "stale" })
     }
@@ -151,7 +151,7 @@ class ProppatchParserTest {
 <D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:test">
   <D:set><D:prop><Z:note>a &amp; b &lt; c</Z:note></D:prop></D:set>
 </D:propertyupdate>"""
-        val instructions = assertNotNull(ProppatchParser.parse(xml))
-        assertEquals("a & b < c", instructions!![0].value)
+        val instructions = requireNotNull(ProppatchParser.parse(xml))
+        assertEquals("a & b < c", instructions[0].value)
     }
 }

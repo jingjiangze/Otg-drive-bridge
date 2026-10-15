@@ -43,7 +43,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jingjiangze/otg-drive-bridge/windows/internal/digest"
+	"github.com/jingjiangze/Otg-drive-bridge/windows/internal/digest"
 )
 
 // Server describes one WebDAV endpoint.
