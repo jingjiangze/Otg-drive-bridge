@@ -15,6 +15,21 @@ import org.w3c.dom.Element
  */
 class WebDavXmlTest {
 
+    /**
+     * A `DAV:`-namespace fixture name.
+     *
+     * `namespaceUri` is what decides whether the emitter keeps the prefix — it is
+     * the identity of the property (RFC 4918 §4.4), and the prefix is only the
+     * document's spelling of it. Constructing `QualifiedName("D", …)` and leaving
+     * the URI at its default `""` builds a name that reads as *no namespace*, and
+     * the emitter then correctly drops the prefix and emits a bare element: a
+     * `D:` prefix with nothing bound is not a name any client can read. Four tests
+     * asserted `<D:getcontentlength/>` on exactly that fixture and failed on the
+     * emitter doing the right thing, so the helper exists to stop the next one.
+     */
+    private fun davName(local: String) =
+        WebDavXml.QualifiedName("D", local).also { it.namespaceUri = "DAV:" }
+
     @Test
     fun `multistatus declares the D namespace`() {
         val body = WebDavXml.multistatus(emptyList())
@@ -210,7 +225,7 @@ class WebDavXmlTest {
     @Test
     fun `namespace declarations are empty when there is nothing to declare`() {
         // `D` is never declared here — the multistatus root owns that binding.
-        val dav = WebDavXml.QualifiedName("D", "getcontentlength").also { it.namespaceUri = "DAV:" }
+        val dav = davName("getcontentlength")
         assertEquals("", WebDavXml.namespaceDeclarationsFor(listOf(dav)))
         assertEquals("", WebDavXml.namespaceDeclarationsFor(emptyList()))
     }
@@ -220,7 +235,7 @@ class WebDavXmlTest {
         // A PROPPATCH *response* carries no values — RFC 4918 §9.2 says the
         // request is echoed back, the client already knows what it sent.
         val xml = WebDavXml.proppatchPropstat(
-            listOf(WebDavXml.QualifiedName("D", "getcontentlength")),
+            listOf(davName("getcontentlength")),
             WebDavXml.HttpStatus.FORBIDDEN,
             WebDavXml.Conditions.CANNOT_MODIFY_PROTECTED_PROPERTY
         )
@@ -261,10 +276,24 @@ class WebDavXmlTest {
         // The complete set from §16. Names that circulate in tutorials but come
         // from RFC 3744 or vendor extensions must NOT be here — a conforming
         // client rejects an error body naming a condition it does not know.
-        // Asserted by *name*, not by `declaredFields.size`: on a Kotlin `object`
-        // that count also includes the `INSTANCE` field the compiler generates,
-        // so the number drifts with the toolchain and the assertion stops
-        // testing the rule it was written for.
+        //
+        // Filtered by *what the field is*, not by name: on a Kotlin `object`
+        // `declaredFields` also holds the `INSTANCE` the compiler generates and —
+        // under the Compose compiler plugin, which AGP 8.5.2 applies here — a
+        // `$stable` marker the stability inference emits. Measured on CI: the
+        // `$stable` field is present and a name-based filter that only excluded
+        // `INSTANCE` reported `[…, $stable]` and failed. Every §16 condition is a
+        // `public static final String`, and neither of those two is, so asserting
+        // the shape is what keeps the set closed without a filter that has to be
+        // updated every time the toolchain adds a field.
+        val conditionNames = WebDavXml.Conditions::class.java.declaredFields
+            .filter { java.lang.reflect.Modifier.isStatic(it.modifiers) }
+            .filter { java.lang.reflect.Modifier.isPublic(it.modifiers) }
+            .filter { java.lang.reflect.Modifier.isFinal(it.modifiers) }
+            .filter { it.type == String::class.java }
+            .filter { it.name != "INSTANCE" }
+            .map { it.name }
+            .toSet()
         assertEquals(
             setOf(
                 "LOCK_TOKEN_MATCHES_REQUEST_URI",
@@ -275,10 +304,7 @@ class WebDavXmlTest {
                 "PROPFIND_FINITE_DEPTH",
                 "CANNOT_MODIFY_PROTECTED_PROPERTY"
             ),
-            WebDavXml.Conditions::class.java.declaredFields
-                .filter { it.name != "INSTANCE" }
-                .map { it.name }
-                .toSet(),
+            conditionNames,
             "the §16 set is closed — every name here, and nothing else"
         )
         listOf(
@@ -301,7 +327,7 @@ class WebDavXmlTest {
             WebDavXml.HttpStatus.OK
         )
         val refused = WebDavXml.proppatchPropstat(
-            listOf(WebDavXml.QualifiedName("D", "getcontentlength")),
+            listOf(davName("getcontentlength")),
             WebDavXml.HttpStatus.FORBIDDEN,
             WebDavXml.Conditions.CANNOT_MODIFY_PROTECTED_PROPERTY
         )
@@ -358,8 +384,10 @@ class WebDavXmlTest {
         assertTrue(xml.contains("</D:multistatus>"))
 
         // No argument means no extra propstat at all — the default must not
-        // inject an empty element.
-        assertEquals(3, Regex("<D:propstat[ >]").findAll(xml).count())
+        // inject an empty element. Two resources (collection + one child) each
+        // carry exactly their own live-property propstat: one per response, and
+        // the count is the number of responses, not the number of properties.
+        assertEquals(2, Regex("<D:propstat[ >]").findAll(xml).count())
         assertEquals(2, Regex("<D:response>").findAll(xml).count())
     }
 
@@ -466,7 +494,7 @@ class WebDavXmlTest {
             WebDavXml.HttpStatus.OK
         )
         val refused = WebDavXml.proppatchPropstat(
-            listOf(WebDavXml.QualifiedName("D", "getcontentlength")),
+            listOf(davName("getcontentlength")),
             WebDavXml.HttpStatus.FORBIDDEN,
             WebDavXml.Conditions.CANNOT_MODIFY_PROTECTED_PROPERTY
         )
