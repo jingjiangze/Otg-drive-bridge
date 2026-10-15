@@ -16,3 +16,8 @@ local.properties
 *.jks
 *.hprof
 !debug.keystore
+
+# Local-only verification tooling: the XML namespace checker, the call-arity
+# checker and their siblings. Developer scratch, not part of the deliverable.
+/_tmp/
+

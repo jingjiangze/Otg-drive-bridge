@@ -205,10 +205,11 @@ class WebDavRequestHandler(
         val ifMatch = call.request.headers["If-Match"]
         if (!ifMatch.isNullOrBlank()) {
             val wanted = ifMatch.trim()
-            if (wanted != "*" && existingEtag == null) {
-                return preconditionFailed(call, "resource does not exist")
-            }
-            if (wanted != "*" && !etagMatches(wanted, existingEtag)) {
+            // Bound to a local so the compiler can see it is non-null here: the
+            // guard above already returned when the resource does not exist, but
+            // that does not smart-cast a property read.
+            val current = existingEtag
+            if (wanted != "*" && (current == null || !etagMatches(wanted, current))) {
                 return preconditionFailed(call, "ETag mismatch")
             }
         }
@@ -721,7 +722,14 @@ class WebDavRequestHandler(
     private suspend fun respondDirectoryIndex(call: ApplicationCall, segments: List<String>, node: DavNode): Boolean {
         val href = WebDavPaths.encodeCollectionHref(segments)
         val children = node.listChildren()
-        val body = WebDavXml.collectionListing(href, node, children) { storage.mimeTypeOf(it) }
+        // `mimeTypeOf` is named because the parameter before it,
+        // `extraForCollection`, is the one this call site leaves out.
+        val body = WebDavXml.collectionListing(
+            baseHref = href,
+            collection = node,
+            children = children,
+            mimeTypeOf = { storage.mimeTypeOf(it) }
+        )
         respondText(
             call,
             body,

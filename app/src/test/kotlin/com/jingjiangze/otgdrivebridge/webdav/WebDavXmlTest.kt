@@ -51,7 +51,14 @@ class WebDavXmlTest {
             fakeNode("b.txt", isDirectory = false, length = 10, lastModified = 1_700_000_001_000),
             fakeNode("a", isDirectory = true, length = 0, lastModified = 1_700_000_002_000)
         )
-        val xml = WebDavXml.collectionListing("/docs/", collection, children) { "application/octet-stream" }
+        // `mimeTypeOf` is named because a trailing lambda binds to the *last*
+        // parameter, `extraForCollection`, which is a List — not a function.
+        val xml = WebDavXml.collectionListing(
+            baseHref = "/docs/",
+            collection = collection,
+            children = children,
+            mimeTypeOf = { "application/octet-stream" }
+        )
         assertTrue(xml.contains("<D:href>/docs/</D:href>"))
         assertTrue(xml.contains("<D:href>/docs/b.txt</D:href>"))
         assertTrue(xml.contains("<D:href>/docs/a/</D:href>"), "collections must end with /")
@@ -286,11 +293,14 @@ class WebDavXmlTest {
     fun `a collection listing keeps the extra propstat inside the collection response`() {
         val collection = fakeNode("docs", isDirectory = true, length = 0, lastModified = 1_700_000_000_000)
         val children = listOf(fakeNode("b.txt", isDirectory = false, length = 10, lastModified = 1_700_000_001_000))
+        // Same named-argument form as every other `collectionListing` call site:
+        // the trailing lambda would land on `extraForCollection`.
         val xml = WebDavXml.collectionListing(
-            "/docs/",
-            collection,
-            children
-        ) { "application/octet-stream" }
+            baseHref = "/docs/",
+            collection = collection,
+            children = children,
+            mimeTypeOf = { "application/octet-stream" }
+        )
         assertTrue(xml.contains("</D:multistatus>"))
 
         // No argument means no extra propstat at all — the default must not
