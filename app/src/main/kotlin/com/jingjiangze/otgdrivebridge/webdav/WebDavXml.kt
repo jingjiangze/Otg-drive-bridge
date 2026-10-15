@@ -43,6 +43,14 @@ object WebDavXml {
      * Emits a `<D:response>` entry. [href] must already be percent-encoded and
      * root-relative (starting with "/").
      *
+     * [etag] is the resource's entity tag, emitted as `DAV:getetag` and omitted
+     * when null. RFC 4918 §15.6: "The getetag property MUST be defined on any
+     * DAV-compliant resource that returns the Etag header." This server returns
+     * an `ETag` on `GET`, so leaving the property out of a listing left a sync
+     * client no way to ask "has anything in this folder changed" without
+     * fetching every file. It is omitted for a collection, because `GET` on one
+     * answers a directory index and sends no `ETag` for it to mirror.
+     *
      * [extraPropstats] are additional `<D:propstat>` blocks for this resource —
      * the dead-property block a PROPFIND adds, for instance. They must arrive as
      * *complete* `<D:propstat>...</D:propstat>` elements, because the multistatus
@@ -56,7 +64,8 @@ object WebDavXml {
         node: DavNode?,
         mimeType: String,
         includeContentLength: Boolean = true,
-        extraPropstats: List<String> = emptyList()
+        extraPropstats: List<String> = emptyList(),
+        etag: String? = null
     ): String = buildString {
         append("<D:response><D:href>").append(escape(href)).append("</D:href>")
         append("<D:propstat><D:prop>")
@@ -70,6 +79,9 @@ object WebDavXml {
             }
             if (!node.isDirectory) {
                 append("<D:getcontenttype>").append(escape(mimeType)).append("</D:getcontenttype>")
+                if (etag != null) {
+                    append("<D:getetag>").append(escape(etag)).append("</D:getetag>")
+                }
             }
             append("<D:resourcetype>")
             if (node.isDirectory) append("<D:collection/>")
@@ -97,6 +109,10 @@ object WebDavXml {
      * Depth 1 collection listing: the collection itself plus its children.
      * [baseHref] is the collection's encoded href (with trailing slash).
      *
+     * [etagOf] supplies each child's entity tag for `DAV:getetag`; the default
+     * omits the property, which is what a caller with no tag to give (a
+     * directory index, say) wants.
+     *
      * [extraForCollection] are extra `<D:propstat>` blocks for the collection's
      * own `<D:response>` — complete elements, passed in rather than concatenated
      * to the result, because the multistatus DTD is `(response+, error?)` and
@@ -107,14 +123,21 @@ object WebDavXml {
         collection: DavNode,
         children: List<DavNode>,
         mimeTypeOf: (String) -> String,
-        extraForCollection: List<String> = emptyList()
+        extraForCollection: List<String> = emptyList(),
+        etagOf: (DavNode) -> String? = { null }
     ): String {
         val entries = ArrayList<String>(children.size + 1)
-        entries += response(baseHref, collection, mimeTypeOf(collection.name), extraPropstats = extraForCollection)
+        entries += response(
+            baseHref,
+            collection,
+            mimeTypeOf(collection.name),
+            extraPropstats = extraForCollection,
+            etag = etagOf(collection)
+        )
         for (child in children) {
             val childHref = baseHref + WebDavPaths.percentEncode(child.name) +
                 if (child.isDirectory) "/" else ""
-            entries += response(childHref, child, mimeTypeOf(child.name))
+            entries += response(childHref, child, mimeTypeOf(child.name), etag = etagOf(child))
         }
         return multistatus(entries)
     }

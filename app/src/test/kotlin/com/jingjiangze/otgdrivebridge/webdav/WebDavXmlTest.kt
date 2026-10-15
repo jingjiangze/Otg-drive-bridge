@@ -546,6 +546,52 @@ class WebDavXmlTest {
         assertEquals("https://jingjiangze.otgdrivebridge/ns#", fallback.namespaceURI)
     }
 
+    @Test
+    fun `a file response carries the entity tag it was given`() {
+        // RFC 4918 §15.6: "The getetag property MUST be defined on any
+        // DAV-compliant resource that returns the Etag header." GET returns one,
+        // so a listing that omits the property leaves a sync client unable to
+        // ask a folder whether anything changed without downloading every file.
+        val node = fakeNode("report.txt", isDirectory = false, length = 1234, lastModified = 1_700_000_000_000)
+        val xml = WebDavXml.response("/docs/report.txt", node, "text/plain", etag = "\"1234-56\"")
+        assertTrue(xml.contains("<D:getetag>&quot;1234-56&quot;</D:getetag>"), xml)
+    }
+
+    @Test
+    fun `a file response without a tag emits no empty getetag`() {
+        // An empty element would be worse than none: a client comparing tags
+        // would read `""` and conclude the file never changes.
+        val node = fakeNode("report.txt", isDirectory = false, length = 1, lastModified = 1)
+        val xml = WebDavXml.response("/docs/report.txt", node, "text/plain")
+        assertFalse(xml.contains("getetag"), xml)
+    }
+
+    @Test
+    fun `a collection response carries no entity tag`() {
+        // GET on a collection answers a directory index and sends no ETag, so
+        // there is no header value for the property to mirror.
+        val node = fakeNode("docs", isDirectory = true, length = 0, lastModified = 1_700_000_000_000)
+        val xml = WebDavXml.response("/docs/", node, "text/plain", etag = "\"0-0\"")
+        assertFalse(xml.contains("getetag"), xml)
+    }
+
+    @Test
+    fun `a listing passes each child's tag through`() {
+        val file = fakeNode("a.txt", isDirectory = false, length = 3, lastModified = 1_700_000_000_000)
+        val xml = WebDavXml.collectionListing(
+            "/",
+            fakeNode("root", isDirectory = true, length = 0, lastModified = 1),
+            listOf(file),
+            { "text/plain" },
+            emptyList(),
+            etagOf = { "\"tag-${it.name}\"" }
+        )
+        assertTrue(xml.contains("<D:getetag>&quot;tag-a.txt&quot;</D:getetag>"), xml)
+        // The collection itself gets none — `etagOf` is asked for it too, and
+        // the emitter drops the property for a directory. One child, one tag.
+        assertEquals(1, Regex("<D:getetag>").findAll(xml).count())
+    }
+
     private fun fakeNode(
         name: String,
         isDirectory: Boolean,

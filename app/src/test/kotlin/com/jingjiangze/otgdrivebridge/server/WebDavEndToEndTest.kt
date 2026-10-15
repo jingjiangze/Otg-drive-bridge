@@ -193,7 +193,12 @@ class WebDavEndToEndTest {
         val copy = authorizedRequest("COPY", "/src.txt") {
             header("Destination", "http://127.0.0.1:$PORT/dst.txt")
         }
-        assertEquals(HttpStatusCode.NoContent, copy.status)
+        // 201, not 204. RFC 4918 §9.8.5 gives 201 when "the COPY operation
+        // resulted in the creation of a new resource" and reserves 204 for a
+        // "preexisting destination resource"; `dst.txt` did not exist, so a
+        // resource *was* created. These assertions read 204 while the status was
+        // chosen by the verb instead of by the destination.
+        assertEquals(HttpStatusCode.Created, copy.status)
         assertEquals("data", authorizedRequest("GET", "/dst.txt").bodyAsText())
     }
 
@@ -219,7 +224,9 @@ class WebDavEndToEndTest {
         val copy = authorizedRequest("COPY", "/tree") {
             header("Destination", "http://127.0.0.1:$PORT/tree-copy")
         }
-        assertEquals(HttpStatusCode.NoContent, copy.status)
+        // 201 for the same reason as `copy duplicates`: `/tree-copy` did not
+        // exist, so the COPY created it (RFC 4918 §9.8.5).
+        assertEquals(HttpStatusCode.Created, copy.status)
         assertEquals("A", authorizedRequest("GET", "/tree-copy/a.txt").bodyAsText())
         assertEquals("B", authorizedRequest("GET", "/tree-copy/sub/b.txt").bodyAsText())
     }
@@ -526,7 +533,9 @@ class WebDavEndToEndTest {
             header("Destination", "http://127.0.0.1:$PORT/free.txt")
             header("Overwrite", "F")
         }
-        assertEquals(HttpStatusCode.NoContent, copy.status)
+        // The point of this case is that the copy *succeeds*; the status is 201
+        // because `/free.txt` did not exist (RFC 4918 §9.8.5).
+        assertEquals(HttpStatusCode.Created, copy.status)
         assertEquals("source", authorizedRequest("GET", "/free.txt").bodyAsText())
     }
 
@@ -871,6 +880,97 @@ class WebDavEndToEndTest {
         assertEquals("内容", authorizedRequest("GET", "/%E4%B8%AD%E6%96%87%E6%96%87%E4%BB%B6.txt").bodyAsText())
         val listing = authorizedRequest("PROPFIND", "/").bodyAsText()
         assertTrue(listing.contains("%E4%B8%AD"))
+    }
+
+    @Test
+    fun `head sends the header fields get would send`() = runBlocking {
+        // RFC 7231 §4.3.2: HEAD is "identical to GET except that the server MUST
+        // NOT send a message body", and it spells out the rest — "The server
+        // SHOULD send the same header fields in response to a HEAD request as it
+        // would have sent if the request had been a GET". Answering with
+        // Content-Length alone left a client no `ETag` to compare, so the
+        // cheapest "has this changed?" question it can ask had no answer and it
+        // had to fall back to a full GET. Measured on-device before the fix.
+        authorizedRequest("PUT", "/head-hdr.bin") { setBody("0123456789") }
+
+        val get = authorizedRequest("GET", "/head-hdr.bin")
+        val head = authorizedRequest("HEAD", "/head-hdr.bin")
+
+        assertEquals(HttpStatusCode.OK, head.status)
+        assertTrue(head.headers["ETag"] != null, "HEAD carried no ETag")
+        assertEquals(get.headers["ETag"], head.headers["ETag"])
+        assertEquals(get.headers["Last-Modified"], head.headers["Last-Modified"])
+        assertEquals("10", head.headers["Content-Length"])
+        assertTrue(head.bodyAsText().isEmpty(), "HEAD must not carry a body")
+    }
+
+    @Test
+    fun `head on a collection invents no entity tag`() = runBlocking {
+        // GET on a collection answers a directory index and sends neither an
+        // ETag nor a Last-Modified, so a HEAD must not either — the invariant is
+        // "the same headers GET would send", not "always send these headers".
+        authorizedRequest("MKCOL", "/head-dir")
+        val head = authorizedRequest("HEAD", "/head-dir")
+        assertEquals(HttpStatusCode.OK, head.status)
+        assertEquals(null, head.headers["ETag"])
+        assertEquals("0", head.headers["Content-Length"])
+    }
+
+    @Test
+    fun `propfind reports the entity tag that get reports`() = runBlocking {
+        // RFC 4918 §15.6: "The getetag property MUST be defined on any
+        // DAV-compliant resource that returns the Etag header." This server
+        // sends one on GET, so a listing has to carry it too, or a client cannot
+        // ask a folder whether anything changed without fetching every file.
+        authorizedRequest("PUT", "/tagged.txt") { setBody("payload") }
+        val etag = authorizedRequest("GET", "/tagged.txt").headers["ETag"]!!
+        val xml = authorizedRequest("PROPFIND", "/tagged.txt").bodyAsText()
+        val escaped = etag.replace("\"", "&quot;")
+        assertTrue(xml.contains("<D:getetag>$escaped</D:getetag>"), xml)
+    }
+
+    @Test
+    fun `a collection listing carries each file's entity tag`() = runBlocking {
+        authorizedRequest("PUT", "/in-listing.txt") { setBody("x") }
+        val etag = authorizedRequest("GET", "/in-listing.txt").headers["ETag"]!!
+        val listing = authorizedRequest("PROPFIND", "/").bodyAsText()
+        assertTrue(listing.contains("<D:getetag>${etag.replace("\"", "&quot;")}</D:getetag>"), listing)
+    }
+
+    @Test
+    fun `move onto an existing destination answers 204`() = runBlocking {
+        // RFC 4918 §9.9.4: 201 is "a new URL mapping was created at the
+        // destination"; 204 is "moved to a URL that was already mapped". The
+        // destination existed here, so a 201 reports a create that never
+        // happened — measured on-device at 201 before the fix.
+        authorizedRequest("PUT", "/mv-src.txt") { setBody("src") }
+        authorizedRequest("PUT", "/mv-dst.txt") { setBody("old") }
+        val moved = authorizedRequest("MOVE", "/mv-src.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/mv-dst.txt")
+        }
+        assertEquals(HttpStatusCode.NoContent, moved.status)
+        assertEquals("src", authorizedRequest("GET", "/mv-dst.txt").bodyAsText())
+        assertEquals(HttpStatusCode.NotFound, authorizedRequest("GET", "/mv-src.txt").status)
+    }
+
+    @Test
+    fun `move to a free destination answers 201`() = runBlocking {
+        authorizedRequest("PUT", "/mv2-src.txt") { setBody("src") }
+        val moved = authorizedRequest("MOVE", "/mv2-src.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/mv2-dst.txt")
+        }
+        assertEquals(HttpStatusCode.Created, moved.status)
+    }
+
+    @Test
+    fun `copy over an existing destination answers 204`() = runBlocking {
+        authorizedRequest("PUT", "/cp-src.txt") { setBody("new") }
+        authorizedRequest("PUT", "/cp-dst.txt") { setBody("old") }
+        val copied = authorizedRequest("COPY", "/cp-src.txt") {
+            header("Destination", "http://127.0.0.1:$PORT/cp-dst.txt")
+        }
+        assertEquals(HttpStatusCode.NoContent, copied.status)
+        assertEquals("new", authorizedRequest("GET", "/cp-dst.txt").bodyAsText())
     }
 
     // ---------------------------------------------------------------- helpers

@@ -8,23 +8,31 @@
 // spelling them out here is the point, and it is what makes the cross-language
 // interop suite meaningful rather than tautological.
 //
-// The nine, and where each one lives:
+// The nine, and where each one lives. The server-side half of several of these
+// has since been implemented; where that is so the entry says which side now
+// holds the behaviour, because a comment that still describes the bug is worse
+// than no comment — it tells the next reader to work around something that is
+// no longer there.
 //
 //  1. stale re-challenge      Do(): one bounded retry on 401, digest.Client.Use
 //  2. opaque mismatch         Do() re-challenges; Client echoes the current
 //     opaque rather than caching a header
 //  3. relative Destination    DestinationStyle — absolute, relative, or custom
-//  4. Overwrite: F → 412      DestinationStyle carries it; the server ignores it
-//     today (WebDavRequestHandler.handleCopyOrMove
-//     never reads the header), which is recorded in
-//     findings.md as a Stage-3 server fix
+//  4. Overwrite: F → 412      DestinationStyle carries it. The server now reads
+//     the header and answers 412 (WebDavRequestHandler.handleCopyOrMove), so
+//     the client's job is only to send it.
 //  5. Depth                   Propfind always sends it explicitly
-//  6. PROPPATCH               BuildProppatch; the server answers 207 with the
-//     current values and applies nothing
-//  7. error XML shape         ParseError reads this server's plain-text bodies
-//     and a DAV XML <error> if one ever arrives
-//  8. ETag / If-Match         Put sends If-Match; the server ignores it on PUT
-//     but does emit an ETag on GET/HEAD
+//  6. PROPPATCH               BuildProppatch; the server now persists dead
+//     properties and answers 207 with per-property outcomes
+//  7. error XML shape         ParseError reads a DAV XML <error> body, and the
+//     server now sends one (its old plain-text reason phrase is gone)
+//  8. ETag / If-Match         Put sends If-Match and the server now honours it
+//     (412 on a mismatch). The server emits an ETag on GET and HEAD, and since
+//     it also defines DAV:getetag in PROPFIND (RFC 4918 §15.6 is a MUST for any
+//     resource that returns the header), Node.ETag is populated from a listing
+//     — the tag it carries is `"<lastModified>-<length>"`, so it moves on every
+//     write, including a byte-identical one. Treat "tags differ" as "may have
+//     changed", never as "content changed"; only a hash answers that.
 //  9. 100-continue            Transport.ExpectContinueTimeout; see PutStream
 //
 // Everything below is written against the server as it is, not as RFC 4918

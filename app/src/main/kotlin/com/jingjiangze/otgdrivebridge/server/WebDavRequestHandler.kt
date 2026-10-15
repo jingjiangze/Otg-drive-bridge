@@ -146,6 +146,23 @@ class WebDavRequestHandler(
         // it, and opening one per HEAD leaked a file descriptor per request
         // against the SAF document provider.
         if (state.method == "HEAD") {
+            // RFC 7231 §4.3.2: a HEAD is "identical to GET except that the
+            // server MUST NOT send a message body", which includes the header
+            // fields — and it says so explicitly ("The server SHOULD send the
+            // same header fields in response to a HEAD request as it would have
+            // sent if the request had been a GET"). This branch used to answer
+            // with `Content-Length` alone, so the cheapest "has this changed?"
+            // question a client can ask returned nothing to compare against and
+            // it had to fall back to a full GET.
+            //
+            // Only for a file: `GET` on a collection answers a directory index
+            // and sends neither header, so a collection's HEAD must not invent
+            // them either.
+            if (!node.isDirectory) {
+                call.response.header("ETag", etagOf(node))
+                call.response.header("Last-Modified", WebDavXml.httpDate(node.lastModified))
+                call.response.header("Accept-Ranges", "bytes")
+            }
             respondEmptyBody(call, if (node.isDirectory) 0L else node.length)
             return true
         }
@@ -318,7 +335,8 @@ class WebDavRequestHandler(
                         href,
                         node,
                         storage.mimeTypeOf(node.name),
-                        extraPropstats = deadPropertiesPropstats(segments)
+                        extraPropstats = deadPropertiesPropstats(segments),
+                        etag = etagOf(node)
                     )
                 )
             )
@@ -331,7 +349,8 @@ class WebDavRequestHandler(
                 node,
                 children,
                 { storage.mimeTypeOf(it) },
-                deadPropertiesPropstats(segments)
+                deadPropertiesPropstats(segments),
+                etagOf = { etagOf(it) }
             )
         }
         call.response.header("Depth", depth)
@@ -507,6 +526,17 @@ class WebDavRequestHandler(
             )
         }
 
+        // RFC 4918 §9.9.4 / §9.8.5 pick the success status by whether a resource
+        // was *created*: 201 when the destination had no mapping before, 204 when
+        // it did and was overwritten. Deriving it from the verb instead — MOVE ⇒
+        // 201, COPY ⇒ 204 — reports a create that did not happen to a MOVE over
+        // an existing file, and hides the create that did happen from a COPY.
+        // Resolved before the operation, because afterwards the mapping exists
+        // either way.
+        val destinationExisted = storage.node(
+            if (destIsDirectory) destSegments + destLeaf else destSegments
+        ) != null
+
         // RFC 4918 §10.6: `Overwrite: F` means "fail if the destination already
         // exists" and the failure status is 412, not 201-with-the-old-name or a
         // silent replacement. Clients (Windows Explorer included) send `F`
@@ -515,10 +545,7 @@ class WebDavRequestHandler(
         // `Overwrite: F` onto an existing file answered 201 and replaced it.
         val overwrite = call.request.headers["Overwrite"]
         if (!overwrite.isNullOrBlank() && overwrite.trim().equals("F", ignoreCase = true)) {
-            val existingTarget = storage.node(
-                if (destIsDirectory) destSegments + destLeaf else destSegments
-            )
-            if (existingTarget != null) {
+            if (destinationExisted) {
                 return preconditionFailed(call, "destination exists and Overwrite is F")
             }
         }
@@ -532,7 +559,7 @@ class WebDavRequestHandler(
             respondText(
                 call,
                 "",
-                if (isMove) HttpStatusCode.Created else HttpStatusCode.NoContent
+                if (destinationExisted) HttpStatusCode.NoContent else HttpStatusCode.Created
             )
         } else {
             respondText(call, "403 Operation failed", HttpStatusCode.Forbidden)
