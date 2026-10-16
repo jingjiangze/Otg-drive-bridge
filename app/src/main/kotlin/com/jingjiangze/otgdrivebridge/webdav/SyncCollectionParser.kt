@@ -1,9 +1,6 @@
 package com.jingjiangze.otgdrivebridge.webdav
 
-import java.io.ByteArrayInputStream
-import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Element
-import org.xml.sax.InputSource
 
 /**
  * One parsed `DAV:sync-collection` REPORT body (RFC 6578 §3.2 / §6.1):
@@ -41,12 +38,7 @@ object SyncCollectionParser {
 
     fun parse(body: String): SyncCollectionRequest? {
         if (body.isBlank()) return null
-        val document = runCatching {
-            val factory = DocumentBuilderFactory.newInstance()
-            factory.isNamespaceAware = true
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            factory.newDocumentBuilder().parse(InputSource(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))))
-        }.getOrNull() ?: return null
+        val document = SecureXml.parse(body) ?: return null
         val root = document.documentElement ?: return null
         if (root.namespaceURI != WebDavXml.DAV_NS || root.localName != "sync-collection") return null
 

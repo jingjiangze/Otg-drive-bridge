@@ -1,9 +1,6 @@
 package com.jingjiangze.otgdrivebridge.webdav
 
-import java.io.ByteArrayInputStream
-import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Element
-import org.xml.sax.InputSource
 
 /**
  * What a PROPFIND (RFC 4918 §9.1) or `DAV:sync-collection` report (RFC 6578
@@ -51,14 +48,7 @@ object PropfindParser {
     fun parse(body: String): PropfindRequest? {
         // The empty-body rule of §9.1 — allprop, verbatim.
         if (body.isBlank()) return PropfindRequest.AllProp
-        val document = runCatching {
-            val factory = DocumentBuilderFactory.newInstance()
-            factory.isNamespaceAware = true
-            // XXE hardening, same as ProppatchParser: a request body is hostile
-            // input, and a DTD would let `file:///` URLs reach the parser.
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            factory.newDocumentBuilder().parse(InputSource(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))))
-        }.getOrNull() ?: return null
+        val document = SecureXml.parse(body) ?: return null
         val root = document.documentElement ?: return null
         // The three forms are *children* of `<D:propfind>`, not alternative
         // roots: §14.20's DTD is `<!ELEMENT propfind (propname | (allprop,

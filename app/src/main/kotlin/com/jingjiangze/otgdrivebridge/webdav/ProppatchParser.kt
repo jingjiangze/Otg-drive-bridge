@@ -1,10 +1,7 @@
 package com.jingjiangze.otgdrivebridge.webdav
 
-import java.io.ByteArrayInputStream
-import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Element
 import org.w3c.dom.Node
-import org.xml.sax.InputSource
 
 /** One `<D:set>` or `<D:remove>` instruction from a PROPPATCH body. */
 data class ProppatchInstruction(
@@ -43,23 +40,7 @@ object ProppatchParser {
 
     fun parse(body: String): List<ProppatchInstruction>? {
         if (body.isBlank()) return null
-        val document = runCatching {
-            val factory = DocumentBuilderFactory.newInstance()
-            // Namespace awareness is mandatory: the element *name* is meaningless
-            // without knowing which namespace it is in, and an unaware parser
-            // silently merges `Z:author` from two different namespaces.
-            factory.isNamespaceAware = true
-            // XXE: a WebDAV body is untrusted input. Without these the parser
-            // would honour a DOCTYPE and an external entity, which on a server
-            // reachable from the LAN is a local-file-disclosure primitive.
-            runCatching {
-                factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-                factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-                factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-            }
-            factory.newDocumentBuilder()
-                .parse(InputSource(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))))
-        }.getOrNull() ?: return null
+        val document = SecureXml.parse(body) ?: return null
 
         val root = document.documentElement ?: return null
         if (root.localName != "propertyupdate") return null
