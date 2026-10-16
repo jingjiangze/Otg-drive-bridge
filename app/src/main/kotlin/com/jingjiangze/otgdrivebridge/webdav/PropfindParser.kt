@@ -60,28 +60,60 @@ object PropfindParser {
             factory.newDocumentBuilder().parse(InputSource(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))))
         }.getOrNull() ?: return null
         val root = document.documentElement ?: return null
-        if (root.namespaceURI != WebDavXml.DAV_NS) return null
-        return when (root.localName) {
-            "allprop" -> PropfindRequest.AllProp
-            "propname" -> PropfindRequest.PropName
-            "prop" -> {
-                val names = ArrayList<WebDavXml.QualifiedName>()
-                // childNodes is an org.w3c.dom.NodeList, which is neither a
-                // Kotlin Iterable nor a Java Iterable: `for (node in …)` does
-                // not resolve, and the extension that does resolve is
-                // ambiguous. Indexed access is the portable form.
-                val children = root.childNodes
-                for (i in 0 until children.length) {
-                    val node = children.item(i)
-                    if (node is Element) {
-                        names += WebDavXml.QualifiedName(node.prefix ?: "", node.localName ?: node.nodeName).apply {
-                            namespaceUri = node.namespaceURI ?: ""
-                        }
-                    }
-                }
-                PropfindRequest.Named(names)
+        // The three forms are *children* of `<D:propfind>`, not alternative
+        // roots: §14.20's DTD is `<!ELEMENT propfind (propname | (allprop,
+        // include?) | prop)>`. Switching on the root's own name — which is always
+        // `propfind` — matched none of them and rejected every well-formed body
+        // (measured on CI: 12 tests red, all of them this one line).
+        //
+        // The root's *namespace* is deliberately not checked, and neither is the
+        // form element's: a client is free to bind the `D:` prefix to anything,
+        // and reading `D:propfind` by its prefix rather than by what it is bound
+        // to is the mistake this parser exists to avoid. What decides whether a
+        // property is `DAV:getetag` is the URI on the property name, and that
+        // comparison belongs to the handler, which has to make it anyway for the
+        // names inside `<D:prop>`.
+        if (root.localName != "propfind") return null
+        val children = root.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child !is Element) continue
+            return when (child.localName) {
+                // `include` rides along as a later sibling and is ignored — see
+                // the class comment.
+                "allprop" -> PropfindRequest.AllProp
+                "propname" -> PropfindRequest.PropName
+                "prop" -> PropfindRequest.Named(propNamesOf(child))
+                else -> null
             }
-            else -> null
         }
+        return null
+    }
+
+    /**
+     * The property names inside a `<D:prop>` element, in document order with
+     * their namespace URIs.
+     *
+     * Unlike the form element above, these are *not* filtered to `DAV:`: a
+     * `<D:prop>` legitimately names dead properties in a client's own namespace,
+     * and dropping them would make the server answer 404 for properties it was
+     * asked to look up.
+     */
+    private fun propNamesOf(prop: Element): List<WebDavXml.QualifiedName> {
+        val names = ArrayList<WebDavXml.QualifiedName>()
+        // childNodes is an org.w3c.dom.NodeList, which is neither a Kotlin
+        // Iterable nor a Java Iterable: `for (node in …)` does not resolve, and
+        // the extension that does resolve is ambiguous. Indexed access is the
+        // portable form.
+        val children = prop.childNodes
+        for (i in 0 until children.length) {
+            val node = children.item(i)
+            if (node is Element) {
+                names += WebDavXml.QualifiedName(node.prefix ?: "", node.localName ?: node.nodeName).apply {
+                    namespaceUri = node.namespaceURI ?: ""
+                }
+            }
+        }
+        return names
     }
 }

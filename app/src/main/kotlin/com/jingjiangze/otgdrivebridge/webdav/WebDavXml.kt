@@ -464,13 +464,34 @@ object WebDavXml {
         const val PRESERVED_LIVE_PROPERTIES = "preserved-live-properties"
         const val PROPFIND_FINITE_DEPTH = "propfind-finite-depth"
         const val CANNOT_MODIFY_PROTECTED_PROPERTY = "cannot-modify-protected-property"
+    }
+
+    /**
+     * Preconditions from RFCs *other* than 4918 §16, kept out of [Conditions]
+     * on purpose.
+     *
+     * §16 is a closed, enumerated set — a conforming client rejects an error
+     * body naming a `DAV:` condition it does not know, so folding a foreign name
+     * in would make this server emit conditions no §16-literate client can
+     * parse. Both names here are well-formed preconditions in their own specs;
+     * they simply are not §16's, which is why the test that asserts the §16 set
+     * is closed can keep asserting it.
+     */
+    object OtherConditions {
 
         /**
-         * RFC 6578 §3.3: the error a collection carries when it does not support
-         * the sync report, so a client can distinguish "not supported here"
-         * from "no such resource". Named in RFC 3253 §3.1.5's precondition.
+         * RFC 3253 §3.1.5: the error a collection carries when it does not
+         * support the sync report, so a client can distinguish "not supported
+         * here" from "no such resource".
          */
         const val SUPPORTED_REPORT = "supported-report"
+
+        /**
+         * RFC 6578 §6.5: the precondition a server raises when the client's
+         * `DAV:sync-token` is one it does not recognise, which is the client's
+         * cue to fall back to an initial (empty-token) sync.
+         */
+        const val VALID_SYNC_TOKEN = "valid-sync-token"
     }
 
     /**

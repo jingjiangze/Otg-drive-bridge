@@ -696,7 +696,7 @@ class WebDavRequestHandler(
             // difference from "no such path".
             return respondDavError(
                 call, HttpStatusCode.Forbidden,
-                WebDavXml.Conditions.SUPPORTED_REPORT,
+                WebDavXml.OtherConditions.SUPPORTED_REPORT,
                 reason = "sync-collection is only supported on the shared root"
             )
         }
@@ -718,7 +718,11 @@ class WebDavRequestHandler(
         if (request.syncToken != null && requestedToken == null) {
             // Not a token this server issued (or one from before a restart):
             // RFC 6578 §3.2's DAV:valid-sync-token precondition.
-            return preconditionFailed(call, "valid-sync-token")
+            return respondDavError(
+                call, HttpStatusCode.PreconditionFailed,
+                WebDavXml.OtherConditions.VALID_SYNC_TOKEN,
+                reason = "unknown sync token"
+            )
         }
         val since = requestedToken ?: 0L
         val (changedPaths, newToken) = changeLog.changesSince("/", since)
@@ -783,9 +787,22 @@ class WebDavRequestHandler(
     /** The sync-token URI for sequence [value] (RFC 6578 §3.2: token MUST be a URI). */
     private fun syncTokenOf(value: Long): String = "$SYNC_TOKEN_BASE$value"
 
-    /** The sequence encoded in [token], or null when this server did not issue it. */
-    private fun tokenValueOf(token: String): Long? =
-        token.removePrefix(SYNC_TOKEN_BASE).toLongOrNull()?.takeIf { it >= 0 }
+    /**
+     * The sequence encoded in [token], or null when this server did not issue
+     * it.
+     *
+     * A token is only valid if this server minted it, which means: right prefix,
+     * and a sequence it has actually reached. Parsing the digits alone would
+     * accept `…/99999` from a client that made the number up, and the report
+     * would then answer 207 with an empty change set — a client reads that as
+     * "nothing changed" and stops syncing, silently. The 412 is the whole point.
+     */
+    private fun tokenValueOf(token: String): Long? {
+        if (!token.startsWith(SYNC_TOKEN_BASE)) return null
+        val value = token.removePrefix(SYNC_TOKEN_BASE).toLongOrNull() ?: return null
+        if (value < 0 || value > changeLog.currentToken()) return null
+        return value
+    }
 
     private companion object {
         const val DEFAULT_MAX_UPLOAD_BYTES = 512L * 1024 * 1024

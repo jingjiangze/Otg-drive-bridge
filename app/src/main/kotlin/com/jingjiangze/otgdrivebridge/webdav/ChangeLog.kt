@@ -41,17 +41,40 @@ class ChangeLog {
      * [path] is root-relative (`"/a/b.txt"`); the root itself is `"/"`.
      */
     fun record(path: String) = synchronized(lock) {
+        val canonical = canonical(path)
         counter += 1
-        var segment = path
-        changed[segment] = counter
+        val sequence = counter
+        if (canonical != "/") changed[canonical] = sequence
         // Walk up to the root, marking each parent collection. `/a/b.txt` ->
         // `/a` -> `/`. `substringBeforeLast('/')` on `/a` yields `""`, which is
         // the root by another spelling — normalised so lookups agree.
+        //
+        // The root itself is deliberately *not* stamped. A sync report names the
+        // members of the collection that changed, and the root is the collection
+        // being reported on, never a member of itself — stamping it made every
+        // report carry a `/` href the client then had to recognise as "not a
+        // member" (measured: a two-file sync answered three members).
+        var segment = canonical
         while (segment != "/") {
             segment = segment.substringBeforeLast('/').ifEmpty { "/" }
-            if (changed[segment] == counter.toLong()) break // ancestors already stamped this round
-            changed[segment] = counter
+            if (segment == "/") break
+            changed[segment] = sequence
         }
+    }
+
+    /**
+     * One spelling for a path: leading slash, no trailing one (except the root).
+     *
+     * Both spellings arrive in practice — handler paths are normalised to
+     * `/a/b`, while some call sites hold `a/b` from a join. Without this the log
+     * becomes two parallel histories over the spelling, and a client syncing one
+     * never sees the other's changes.
+     */
+    private fun canonical(path: String): String {
+        var value = path.trim()
+        if (!value.startsWith("/")) value = "/$value"
+        if (value.length > 1) value = value.trimEnd('/')
+        return value.ifEmpty { "/" }
     }
 
     /**
@@ -62,10 +85,11 @@ class ChangeLog {
      * "from the beginning", which is the initial-sync case of RFC 6578 §3.4.
      */
     fun changesSince(collectionPath: String, token: Long): Pair<List<String>, Long> = synchronized(lock) {
-        val prefix = if (collectionPath.endsWith("/")) collectionPath else "$collectionPath/"
+        val target = canonical(collectionPath)
+        val prefix = if (target.endsWith("/")) target else "$target/"
         val hits = changed.entries
             .filter { (path, seq) ->
-                seq > token && (path == collectionPath || path.startsWith(prefix))
+                seq > token && (path == target || path.startsWith(prefix))
             }
             .map { it.key }
             .sorted()

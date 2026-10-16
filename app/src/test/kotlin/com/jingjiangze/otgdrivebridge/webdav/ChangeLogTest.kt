@@ -1,6 +1,7 @@
 package com.jingjiangze.otgdrivebridge.webdav
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -21,11 +22,16 @@ class ChangeLogTest {
         log.record("/a/b/c.txt")
         val (atRoot, _) = log.changesSince("/", 0)
         val (atA, _) = log.changesSince("/a", 0)
-        val (atB, _) = log.changesSince("/b", 0)
+        val (atB, _) = log.changesSince("/a/b", 0)
         val (atC, _) = log.changesSince("/a/b/c.txt", 0)
+        // `/b` is deliberately absent: it is *not* an ancestor of `/a/b/c.txt`,
+        // and a prefix test that matched anywhere in the path would make every
+        // directory report every file whose name merely contains it.
+        val (atUnrelated, _) = log.changesSince("/b", 0)
         assertTrue(atRoot.contains("/a/b/c.txt"), atRoot.toString())
         assertTrue(atA.contains("/a/b/c.txt"), atA.toString())
         assertTrue(atB.contains("/a/b/c.txt"), atB.toString())
+        assertFalse(atUnrelated.contains("/a/b/c.txt"), atUnrelated.toString())
         assertEquals(listOf("/a/b/c.txt"), atC)
     }
 
