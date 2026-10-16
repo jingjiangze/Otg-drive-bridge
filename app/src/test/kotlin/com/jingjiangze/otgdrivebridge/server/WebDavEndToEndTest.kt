@@ -1005,7 +1005,7 @@ class WebDavEndToEndTest {
         // §14.21: "only a list of property names … is to be returned" — a name
         // element is empty, a value one is not.
         assertTrue(xml.contains("<D:getetag/>"), xml)
-        assertFalse(Regex("<D:getetag>[^<]"), xml)
+        assertFalse(Regex("<D:getetag>[^<]").containsMatchIn(xml), xml)
         assertTrue(xml.contains("<D:getlastmodified/>"), xml)
     }
 
