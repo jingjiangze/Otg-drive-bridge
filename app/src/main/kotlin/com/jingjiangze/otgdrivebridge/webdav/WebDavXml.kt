@@ -220,6 +220,87 @@ object WebDavXml {
     }
 
     /**
+     * A `<D:propstat>` for the properties a PROPFIND was asked for but could not
+     * return — RFC 4918 §9.1: "A request to retrieve the value of a property
+     * that does not exist is an error and MUST be noted with a 'response' XML
+     * element that contains a 404 (Not Found) status value."
+     *
+     * The old handler answered every PROPFIND with the same fixed property set,
+     * which reads as success for properties the server has never heard of: a
+     * client probing for a capability (locking? quota? getetag?) could not tell
+     * "absent" from "unsupported". Per §14.22 the names in a propstat describe
+     * *which* properties the status applies to, so the names are echoed — empty
+     * elements, no values — inside the 404 block.
+     */
+    fun notFoundPropstat(names: List<QualifiedName>): String = buildString {
+        append("<D:propstat").append(namespaceDeclarationsFor(names)).append('>')
+        append("<D:prop>")
+        for (name in names) append('<').append(qualifiedTagOf(name)).append("/>")
+        append("</D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>")
+    }
+
+    /**
+     * A `<D:propstat>` for PROPFIND's `propname` mode: the **names** of the
+     * properties defined on the resource, no values (RFC 4918 §14.21:
+     * "Specifies that only a list of property names on the resource is to be
+     * returned", and §14.22 requires a propstat's prop to "only list the names").
+     */
+    fun propnamePropstat(names: List<QualifiedName>): String = buildString {
+        append("<D:propstat").append(namespaceDeclarationsFor(names)).append('>')
+        append("<D:prop>")
+        for (name in names) append('<').append(qualifiedTagOf(name)).append("/>")
+        append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>")
+    }
+
+    /**
+     * A `<D:response>` for one member of a `DAV:sync-collection` report
+     * (RFC 6578 §3.2). [changed] entries carry a propstat (values the client
+     * asked for); [deleted] hrefs carry a bare 404 status and **must not** carry
+     * a propstat — that asymmetry is how a sync client tells "content changed"
+     * from "resource removed" without a second round trip. [token] is emitted
+     * once on the multistatus, outside every response (RFC 6578 §6.4).
+     */
+    fun syncResponse(
+        href: String,
+        changed: List<Pair<String, String>>,
+        deleted: List<String>,
+        token: String
+    ): String = buildString {
+        append("<?xml version=\"1.0\" encoding=\"utf-8\"?>")
+        append("<D:multistatus xmlns:D=\"DAV:\">")
+        for ((memberHref, propstat) in changed) {
+            append("<D:response><D:href>").append(escape(memberHref)).append("</D:href>")
+            append(propstat)
+            append("</D:response>")
+        }
+        for (memberHref in deleted) {
+            append("<D:response><D:href>").append(escape(memberHref)).append("</D:href>")
+            append("<D:status>HTTP/1.1 404 Not Found</D:status>")
+            append("</D:response>")
+        }
+        append("<D:sync-token>").append(escape(token)).append("</D:sync-token>")
+        append("</D:multistatus>")
+    }
+
+    /** The `DAV:supported-report-set` property value: this server's reports. */
+    fun supportedReportSet(): String =
+        "<D:supported-report-set><D:supported-report><D:report><D:sync-collection/></D:report>" +
+            "</D:supported-report></D:supported-report-set>"
+
+    /**
+     * A `<D:response>` whose property block is already built — the escape hatch
+     * for callers that assemble propstats themselves (a `prop` PROPFIND splits
+     * found from missing, `propname` emits names only). Element names here
+     * follow the same rule as [response]: hrefs must be pre-encoded and
+     * root-relative.
+     */
+    fun multistatusEntry(href: String, propstats: String): String = buildString {
+        append("<D:response><D:href>").append(escape(href)).append("</D:href>")
+        append(propstats)
+        append("</D:response>")
+    }
+
+    /**
      * The XML tag for [name]: `prefix:local` normally, bare `local` when the
      * property is in no namespace.
      *
@@ -346,7 +427,7 @@ object WebDavXml {
 
     /** OPTIONS/`Allow` header value: every method this server implements. */
     const val ALLOWED_METHODS =
-        "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK"
+        "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK, REPORT"
 
     /** DAV compliance class advertised in OPTIONS. */
     const val DAV_HEADER = "1, 2"
@@ -371,6 +452,13 @@ object WebDavXml {
         const val PRESERVED_LIVE_PROPERTIES = "preserved-live-properties"
         const val PROPFIND_FINITE_DEPTH = "propfind-finite-depth"
         const val CANNOT_MODIFY_PROTECTED_PROPERTY = "cannot-modify-protected-property"
+
+        /**
+         * RFC 6578 §3.3: the error a collection carries when it does not support
+         * the sync report, so a client can distinguish "not supported here"
+         * from "no such resource". Named in RFC 3253 §3.1.5's precondition.
+         */
+        const val SUPPORTED_REPORT = "supported-report"
     }
 
     /**

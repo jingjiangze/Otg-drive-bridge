@@ -884,12 +884,12 @@ class WebDavEndToEndTest {
 
     @Test
     fun `head sends the header fields get would send`() = runBlocking {
-        // RFC 7231 §4.3.2: HEAD is "identical to GET except that the server MUST
-        // NOT send a message body", and it spells out the rest — "The server
-        // SHOULD send the same header fields in response to a HEAD request as it
-        // would have sent if the request had been a GET". Answering with
+        // RFC 7231 §4.3.2: HEAD is identical to GET except that the server MUST
+        // NOT send a message body, and it spells out the rest: the server SHOULD
+        // send the same header fields in response to a HEAD request as it would
+        // have sent if the request had been a GET. Answering with
         // Content-Length alone left a client no `ETag` to compare, so the
-        // cheapest "has this changed?" question it can ask had no answer and it
+        // cheapest has-this-changed question it can ask had no answer and it
         // had to fall back to a full GET. Measured on-device before the fix.
         authorizedRequest("PUT", "/head-hdr.bin") { setBody("0123456789") }
 
@@ -971,6 +971,251 @@ class WebDavEndToEndTest {
         }
         assertEquals(HttpStatusCode.NoContent, copied.status)
         assertEquals("new", authorizedRequest("GET", "/cp-dst.txt").bodyAsText())
+    }
+
+    @Test
+    fun `propfind prop returns values for known names and 404 for unknown ones`() = runBlocking {
+        // RFC 4918 §9.1: a missing property "MUST be noted with a 'response'
+        // XML element that contains a 404 (Not Found) status value". Before the
+        // body was parsed, every PROPFIND answered with the same fixed set, so
+        // a client probing a capability could not tell "absent" from
+        // "unsupported".
+        authorizedRequest("PUT", "/props.txt") { setBody("v") }
+        val xml = authorizedRequest("PROPFIND", "/props.txt") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop>""" +
+                "<D:getcontentlength/><D:quota-available-bytes/></D:prop></D:propfind>")
+            header("Depth", "0")
+        }.bodyAsText()
+
+        assertTrue(xml.contains("<D:getcontentlength>1</D:getcontentlength>"), xml)
+        assertTrue(xml.contains("<D:status>HTTP/1.1 404 Not Found</D:status>"), xml)
+        assertTrue(xml.contains("<D:quota-available-bytes/>"), xml)
+        // A request naming two properties must not grow the other live ones —
+        // the point of `prop` is asking for less.
+        assertFalse(xml.contains("<D:displayname>"), xml)
+    }
+
+    @Test
+    fun `propfind propname returns names without values`() = runBlocking {
+        authorizedRequest("PUT", "/names.txt") { setBody("v") }
+        val xml = authorizedRequest("PROPFIND", "/names.txt") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>""")
+            header("Depth", "0")
+        }.bodyAsText()
+        // §14.21: "only a list of property names … is to be returned" — a name
+        // element is empty, a value one is not.
+        assertTrue(xml.contains("<D:getetag/>"), xml)
+        assertFalse(Regex("<D:getetag>[^<]"), xml)
+        assertTrue(xml.contains("<D:getlastmodified/>"), xml)
+    }
+
+    @Test
+    fun `propfind prop getetag returns the same tag get does`() = runBlocking {
+        authorizedRequest("PUT", "/etag-prop.txt") { setBody("v") }
+        val etag = authorizedRequest("GET", "/etag-prop.txt").headers["ETag"]!!
+        val xml = authorizedRequest("PROPFIND", "/etag-prop.txt") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop></D:propfind>""")
+            header("Depth", "0")
+        }.bodyAsText()
+        assertTrue(xml.contains("<D:getetag>${etag.replace("\"", "&quot;")}</D:getetag>"), xml)
+        assertFalse(xml.contains("404"), xml)
+    }
+
+    @Test
+    fun `propfind depth 1 applies prop to every child`() = runBlocking {
+        // §9.1: the prop element describes "what information is being
+        // requested" — one list for the whole request, applied per member. A
+        // listing that answers the collection but not the children would leave
+        // the client one PROPFIND per file, which is what the request exists
+        // to avoid.
+        authorizedRequest("PUT", "/c1.txt") { setBody("one") }
+        authorizedRequest("PUT", "/c2.txt") { setBody("two") }
+        val xml = authorizedRequest("PROPFIND", "/") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop></D:propfind>""")
+            header("Depth", "1")
+        }.bodyAsText()
+        assertTrue(Regex("<D:href>/c1\\.txt</D:href>.{0,400}?<D:getetag>").containsMatchIn(xml), xml)
+        assertTrue(Regex("<D:href>/c2\\.txt</D:href>.{0,400}?<D:getetag>").containsMatchIn(xml), xml)
+    }
+
+    @Test
+    fun `a malformed propfind body is 400 not an allprop guess`() = runBlocking {
+        val response = authorizedRequest("PROPFIND", "/") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:nonsense/></D:propfind>""")
+            header("Depth", "0")
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `propfind supported-report-set advertises sync-collection`() = runBlocking {
+        val xml = authorizedRequest("PROPFIND", "/") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:supported-report-set/></D:prop></D:propfind>""")
+            header("Depth", "0")
+        }.bodyAsText()
+        assertTrue(xml.contains("<D:sync-collection/>"), xml)
+        assertFalse(xml.contains("404"), xml)
+    }
+
+    // ------------------------------------------------- sync-collection REPORT
+
+    private suspend fun syncReport(token: String?): io.ktor.client.statement.HttpResponse =
+        authorizedRequest("REPORT", "/") {
+            setBody(
+                """<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:">""" +
+                    "<D:sync-token>${token ?: ""}</D:sync-token>" +
+                    "<D:sync-level>1</D:sync-level>" +
+                    "<D:prop><D:getetag/><D:getlastmodified/></D:prop></D:sync-collection>"
+            )
+            header("Depth", "0")
+        }
+
+    @Test
+    fun `initial sync report lists every member with a token`() = runBlocking {
+        authorizedRequest("PUT", "/a.txt") { setBody("a") }
+        authorizedRequest("PUT", "/b.txt") { setBody("b") }
+        val response = syncReport(null)
+        assertEquals(HttpStatusCode.MultiStatus, response.status)
+        val xml = response.bodyAsText()
+        assertTrue(xml.contains("/a.txt"), xml)
+        assertTrue(xml.contains("/b.txt"), xml)
+        // RFC 6578 §3.2: the response "MUST contain one DAV:sync-token".
+        assertTrue(xml.contains("<D:sync-token>https://jingjiangze.otgdrivebridge/ns#sync/"), xml)
+        assertTrue(xml.contains("<D:getetag>"), xml)
+    }
+
+    @Test
+    fun `incremental sync reports only what changed since the token`() = runBlocking {
+        authorizedRequest("PUT", "/s1.txt") { setBody("one") }
+        authorizedRequest("PUT", "/s2.txt") { setBody("two") }
+        val first = syncReport(null)
+        val token = Regex("<D:sync-token>([^<]+)</D:sync-token>").find(first.bodyAsText())!!.groupValues[1]
+
+        // One more write, one rename — the report must name those and stay
+        // silent about the two files the token already covers.
+        authorizedRequest("PUT", "/s3.txt") { setBody("three") }
+        val second = syncReport(token).bodyAsText()
+        assertTrue(second.contains("/s3.txt"), second)
+        assertFalse(second.contains("/s1.txt"), second)
+        assertFalse(second.contains("/s2.txt"), second)
+    }
+
+    @Test
+    fun `a deletion is reported as a bare 404 response`() = runBlocking {
+        authorizedRequest("PUT", "/doomed.txt") { setBody("x") }
+        val token = Regex("<D:sync-token>([^<]+)</D:sync-token>").find(syncReport(null).bodyAsText())!!.groupValues[1]
+        authorizedRequest("DELETE", "/doomed.txt")
+        val xml = syncReport(token).bodyAsText()
+        assertTrue(xml.contains("/doomed.txt"), xml)
+        // RFC 6578 §3.2: removed members carry "one DAV:status with a value set
+        // to '404 Not Found' and MUST NOT contain any DAV:propstat element".
+        val entry = xml.substringAfter("/doomed.txt").substringBefore("</D:response>")
+        assertTrue(entry.contains("404 Not Found"), entry)
+        assertFalse(entry.contains("propstat"), entry)
+    }
+
+    @Test
+    fun `an unknown sync token is 412 so the client falls back to a full sync`() = runBlocking {
+        // RFC 6578 §3.2, DAV:valid-sync-token. A token from before a restart is
+        // the live case: the log is in-memory by design, and the recovery is an
+        // initial sync with the empty token.
+        authorizedRequest("PUT", "/token.txt") { setBody("x") }
+        val response = syncReport("https://jingjiangze.otgdrivebridge/ns#sync/99999")
+        assertEquals(HttpStatusCode.PreconditionFailed, response.status)
+    }
+
+    @Test
+    fun `report with a depth other than zero is 400`() = runBlocking {
+        val response = authorizedRequest("REPORT", "/") {
+            setBody(
+                """<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:"><D:sync-token/>""" +
+                    "<D:sync-level>1</D:sync-level><D:prop><D:getetag/></D:prop></D:sync-collection>"
+            )
+            header("Depth", "1")
+        }
+        // RFC 6578 §3.2: "only defined when the Depth header has value '0';
+        // other values result in a 400".
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `a malformed report body is 400`() = runBlocking {
+        val response = authorizedRequest("REPORT", "/") {
+            setBody("""<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:"><D:sync-token/></D:sync-collection>""")
+            header("Depth", "0")
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `options advertises report in allow`() = runBlocking {
+        val response = request("OPTIONS", "/")
+        assertTrue(response.headers["Allow"]!!.contains("REPORT"), response.headers["Allow"]!!)
+    }
+
+    // ------------------------------------------------- three-level write policy
+
+    @Test
+    fun `preserve keeps both versions when the precondition fails`() = runBlocking {
+        // The third level of the write policy: the expected write (If-Match)
+        // fails because a peer saved meanwhile, and the client asked that both
+        // versions survive rather than 412-ing into a retry loop. The server
+        // renames the old file aside and writes the new body to the original
+        // name in one request — no window for a third writer.
+        authorizedRequest("PUT", "/doc.txt") { setBody("from-phone") }
+        authorizedRequest("PUT", "/doc.txt") { setBody("from-windows") } // the peer's edit
+
+        val response = authorizedRequest("PUT", "/doc.txt") {
+            header("If-Match", "\"0000000000000-0\"") // stale on purpose
+            header("X-OTG-On-Conflict", "preserve")
+            setBody("from-tablet")
+        }
+        assertEquals(HttpStatusCode.Created, response.status)
+        val copyHref = response.headers["X-OTG-Conflict-Copy"]
+        assertTrue(copyHref != null && copyHref.startsWith("/doc.conflict-"), "header=$copyHref")
+
+        // The original name carries the new write; the conflict copy carries
+        // what the peer saved. Both readable, neither lost.
+        assertEquals("from-tablet", authorizedRequest("GET", "/doc.txt").bodyAsText())
+        val copyBody = authorizedRequest("GET", copyHref!!).bodyAsText()
+        assertEquals("from-windows", copyBody)
+    }
+
+    @Test
+    fun `preserve copies appear in the sync report`() = runBlocking {
+        authorizedRequest("PUT", "/sync-doc.txt") { setBody("v1") }
+        val token = Regex("<D:sync-token>([^<]+)</D:sync-token>").find(syncReport(null).bodyAsText())!!.groupValues[1]
+        authorizedRequest("PUT", "/sync-doc.txt") {
+            header("If-Match", "\"stale-0\"")
+            header("X-OTG-On-Conflict", "preserve")
+            setBody("v2")
+        }
+        val xml = syncReport(token).bodyAsText()
+        assertTrue(xml.contains("/sync-doc.txt"), xml)
+        assertTrue(Regex("/sync-doc\\.conflict-\\d+\\.txt").containsMatchIn(xml), xml)
+    }
+
+    @Test
+    fun `an unknown on-conflict value is 400`() = runBlocking {
+        val response = authorizedRequest("PUT", "/policy.txt") {
+            header("X-OTG-On-Conflict", "merge")
+            setBody("v")
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `overwrite is the default and answers 412 as before`() = runBlocking {
+        // The policy header is opt-in; without it the behaviour a mainstream
+        // WebDAV client expects — a plain 412 to retry against — must not
+        // change underneath it.
+        authorizedRequest("PUT", "/default.txt") { setBody("v1") }
+        val response = authorizedRequest("PUT", "/default.txt") {
+            header("If-Match", "\"stale-0\"")
+            setBody("v2")
+        }
+        assertEquals(HttpStatusCode.PreconditionFailed, response.status)
+        assertEquals("v1", authorizedRequest("GET", "/default.txt").bodyAsText())
     }
 
     // ---------------------------------------------------------------- helpers

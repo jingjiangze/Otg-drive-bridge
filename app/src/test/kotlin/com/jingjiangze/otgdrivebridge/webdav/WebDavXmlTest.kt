@@ -592,6 +592,64 @@ class WebDavXmlTest {
         assertEquals(1, Regex("<D:getetag>").findAll(xml).count())
     }
 
+    @Test
+    fun `a 404 propstat names the missing properties and carries no values`() {
+        val missing = listOf(
+            WebDavXml.QualifiedName("D", "quota-available-bytes").also { it.namespaceUri = "DAV:" },
+            WebDavXml.QualifiedName("Z", "nosuch").also { it.namespaceUri = "urn:example" }
+        )
+        val xml = WebDavXml.notFoundPropstat(missing)
+        assertTrue(xml.contains("<D:status>HTTP/1.1 404 Not Found</D:status>"), xml)
+        assertTrue(xml.contains("<D:quota-available-bytes/>"), xml)
+        assertTrue(xml.contains("<Z:nosuch/>"), xml)
+        assertFalse(xml.contains("urn:example:test"), xml)
+        // Namespace-well-formed: the emitted Z prefix carries its binding.
+        val document = parseNamespaceAware("<D:multistatus xmlns:D=\"DAV:\"><D:response>$xml</D:response></D:multistatus>")
+        assertEquals(1, document.elements("D:propstat").size)
+    }
+
+    @Test
+    fun `a propname propstat lists names without values`() {
+        val names = listOf(WebDavXml.QualifiedName("D", "getetag").also { it.namespaceUri = "DAV:" })
+        val xml = WebDavXml.propnamePropstat(names)
+        assertTrue(xml.contains("<D:getetag/>"), xml)
+        assertFalse(xml.contains("getetag>"), xml)
+        assertTrue(xml.contains("200 OK"), xml)
+    }
+
+    @Test
+    fun `a sync response separates changed from deleted and ends with the token`() {
+        val propstat = "<D:propstat><D:prop><D:getetag>&quot;1-2&quot;</D:getetag></D:prop>" +
+            "<D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+        val xml = WebDavXml.syncResponse(
+            "/",
+            changed = listOf("/kept.txt" to propstat),
+            deleted = listOf("/gone.txt"),
+            token = "https://jingjiangze.otgdrivebridge/ns#sync/7"
+        )
+        val document = parseNamespaceAware(xml)
+        assertEquals(2, document.elements("D:response").size)
+        assertEquals(1, document.elements("D:sync-token").size)
+        assertTrue(xml.contains("<D:sync-token>https://jingjiangze.otgdrivebridge/ns#sync/7</D:sync-token>"), xml)
+        // The deleted member has a status and no propstat (RFC 6578 §3.2);
+        // the changed member the other way round.
+        val deleted = xml.substringAfter("/gone.txt").substringBefore("</D:response>")
+        assertTrue(deleted.contains("404 Not Found"), deleted)
+        assertFalse(deleted.contains("propstat"), deleted)
+        val changed = xml.substringAfter("/kept.txt").substringBefore("</D:response>")
+        assertTrue(changed.contains(propstat), changed)
+    }
+
+    @Test
+    fun `supported-report-set advertises sync-collection`() {
+        val xml = WebDavXml.supportedReportSet()
+        val document = parseNamespaceAware(
+            "<D:prop xmlns:D=\"DAV:\">$xml</D:prop>"
+        )
+        assertEquals(1, document.elements("D:supported-report").size)
+        assertTrue(xml.contains("<D:sync-collection/>"), xml)
+    }
+
     private fun fakeNode(
         name: String,
         isDirectory: Boolean,

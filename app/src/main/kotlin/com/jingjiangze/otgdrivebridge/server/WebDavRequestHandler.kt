@@ -2,11 +2,14 @@ package com.jingjiangze.otgdrivebridge.server
 
 import com.jingjiangze.otgdrivebridge.security.CredentialGenerator
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
+import com.jingjiangze.otgdrivebridge.webdav.ChangeLog
 import com.jingjiangze.otgdrivebridge.webdav.DavNode
 import com.jingjiangze.otgdrivebridge.webdav.DavPropertyStore
 import com.jingjiangze.otgdrivebridge.webdav.DavStorage
 import com.jingjiangze.otgdrivebridge.webdav.LockManager
+import com.jingjiangze.otgdrivebridge.webdav.PropfindParser
 import com.jingjiangze.otgdrivebridge.webdav.ProppatchParser
+import com.jingjiangze.otgdrivebridge.webdav.PropfindRequest
 import com.jingjiangze.otgdrivebridge.webdav.WebDavPaths
 import com.jingjiangze.otgdrivebridge.webdav.WebDavXml
 import io.ktor.http.ContentType
@@ -42,7 +45,8 @@ class WebDavRequestHandler(
     private val authenticator: DigestAuthenticator,
     private val lockManager: LockManager = LockManager(),
     private val maxUploadBytes: Long = DEFAULT_MAX_UPLOAD_BYTES,
-    private val propertyStore: DavPropertyStore = DavPropertyStore()
+    private val propertyStore: DavPropertyStore = DavPropertyStore(),
+    private val changeLog: ChangeLog = ChangeLog()
 ) {
 
     /** Mutable per-request state, reset on every [handle] call. */
@@ -89,6 +93,7 @@ class WebDavRequestHandler(
             "MOVE" -> handleCopyOrMove(call, isMove = true)
             "LOCK" -> handleLock(call)
             "UNLOCK" -> handleUnlock(call)
+            "REPORT" -> handleReport(call)
             else -> {
                 respondText(call, "405 Method Not Allowed", HttpStatusCode.MethodNotAllowed)
                 false
@@ -220,6 +225,23 @@ class WebDavRequestHandler(
         // one's work — a lost-update, not just a spec gap.
         val existingEtag = if (existing == null) null else etagOf(existing)
         val ifMatch = call.request.headers["If-Match"]
+
+        // The three-level write policy the product asks for: try the expected
+        // write (modify), on a mismatch retry with fresh state (resend), and if
+        // the conflict is real preserve both versions under two names (keep +
+        // rename). Levels one and two are entirely the client's discipline —
+        // send If-Match, and on 412 re-read before retrying. Level three is a
+        // server primitive, because a client doing it by hand needs
+        // MOVE-then-PUT with a third writer able to slip in between; one
+        // request with an atomic rename cannot race.
+        //
+        // `X-OTG-On-Conflict: preserve` is the opt-in. Default `overwrite`
+        // keeps the plain-412 behaviour every mainstream WebDAV client expects:
+        // renegotiating on their behalf would surprise rclone and Explorer.
+        val onConflict = call.request.headers["X-OTG-On-Conflict"]?.trim()?.lowercase()
+        if (onConflict != null && onConflict != "overwrite" && onConflict != "preserve") {
+            return respondText(call, "400 Unknown X-OTG-On-Conflict value", HttpStatusCode.BadRequest)
+        }
         if (!ifMatch.isNullOrBlank()) {
             val wanted = ifMatch.trim()
             // Bound to a local so the compiler can see it is non-null here: the
@@ -233,6 +255,9 @@ class WebDavRequestHandler(
             if (wanted == "*") {
                 if (existing == null) return preconditionFailed(call, "resource does not exist")
             } else if (current == null || !etagMatches(wanted, current)) {
+                if (onConflict == "preserve" && existing != null) {
+                    return preserveAndWrite(call, segments, parent, leaf, existing)
+                }
                 return preconditionFailed(call, "ETag mismatch")
             }
         }
@@ -286,7 +311,90 @@ class WebDavRequestHandler(
         // (`"<currentTimeMillis>-<written>"`) was a second, incompatible
         // scheme that also changed on every request.
         call.response.header("ETag", etagOf(target))
+        changeLog.record(WebDavPaths.encodeHref(segments))
         respondText(call, "", if (existing == null) HttpStatusCode.Created else HttpStatusCode.NoContent)
+        return true
+    }
+
+    /**
+     * The third level of the write policy: a real concurrent edit, and the
+     * client asked that both versions survive. The existing file is renamed to
+     * a conflict-copy name *before* the incoming body is staged, so between the
+     * rename and the commit the original name is empty rather than half-old —
+     * and a reader arriving in that window sees 404, which is recoverable, not
+     * a torn mixture of two versions, which is not.
+     *
+     * The copy name goes back in `X-OTG-Conflict-Copy`; the response is
+     * `201 Created` because that is what happened — a fresh resource at the
+     * request path — and the preconditions that would have made it 412 were
+     * discharged by the rename. RFC 4918's own conflict-copy precedent is
+     * client-side (Syncthing, Nextcloud); this is the same outcome with the
+     * server doing the rename so no third writer can slip between the two steps.
+     */
+    private suspend fun preserveAndWrite(
+        call: ApplicationCall,
+        segments: List<String>,
+        parent: DavNode,
+        leaf: String,
+        existing: DavNode
+    ): Boolean {
+        val dot = leaf.lastIndexOf('.')
+        val stem = if (dot > 0) leaf.substring(0, dot) else leaf
+        val ext = if (dot > 0) leaf.substring(dot) else ""
+        // Nextcloud's ` (conflicted copy <user> <time>)` shape, shortened for
+        // FAT's name limits and kept ASCII so the round trip through every
+        // filesystem is byte-identical. Collision-safe to two attempts.
+        var copyName = "$stem.conflict-${System.currentTimeMillis()}$ext"
+        if (storage.node(segments.dropLast(1) + copyName) != null) {
+            copyName = "$stem.conflict-${System.currentTimeMillis()}-${(0..9999).random()}$ext"
+        }
+        val copyNode = storage.node(segments.dropLast(1) + copyName)
+        if (copyNode != null || !storage.move(existing, parent, copyName)) {
+            return respondText(call, "500 Could not preserve the previous version", HttpStatusCode.InternalServerError)
+        }
+        changeLog.record(WebDavPaths.encodeHref(segments.dropLast(1) + copyName))
+
+        // From here this is an ordinary PUT of the incoming body onto the now
+        // free original name — the file is created fresh, so the response is 201.
+        val target = storage.createFile(parent, leaf) ?: return respondText(
+            call, "500 Could not create file", HttpStatusCode.InternalServerError
+        )
+        val handle = storage.openWrite(target, overwrite = true) ?: return respondText(
+            call, "403 Read-only or unavailable", HttpStatusCode.Forbidden
+        )
+        val declaredLength = call.request.headers["Content-Length"]?.toLongOrNull()
+        var written = 0L
+        try {
+            val channel = call.receiveChannel()
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = channel.readAvailable(buffer, 0, buffer.size)
+                if (read <= 0) break
+                handle.output.write(buffer, 0, read)
+                written += read
+                if (written > maxUploadBytes) {
+                    handle.abort()
+                    return respondText(call, "413 Payload Too Large", HttpStatusCode.PayloadTooLarge)
+                }
+            }
+            if (declaredLength != null && written != declaredLength) {
+                handle.abort()
+                return respondText(call, "400 Content-Length mismatch", HttpStatusCode.BadRequest)
+            }
+            if (!handle.commit()) {
+                handle.abort()
+                return respondText(call, "500 Write failed", HttpStatusCode.InternalServerError)
+            }
+        } catch (t: Throwable) {
+            handle.abort()
+            return respondText(call, "400 Upload failed", HttpStatusCode.BadRequest)
+        } finally {
+            handle.close()
+        }
+        call.response.header("ETag", etagOf(target))
+        call.response.header("X-OTG-Conflict-Copy", WebDavPaths.encodeHref(segments.dropLast(1) + copyName))
+        changeLog.record(WebDavPaths.encodeHref(segments))
+        respondText(call, "", HttpStatusCode.Created)
         return true
     }
 
@@ -298,6 +406,9 @@ class WebDavRequestHandler(
         }
         val node = storage.node(segments) ?: return respondText(call, "404 Not Found", HttpStatusCode.NotFound)
         return if (storage.delete(node)) {
+            // A deletion is itself a change a sync client must see: RFC 6578
+            // §3.2 wants removed members reported with a bare 404 status.
+            changeLog.record(WebDavPaths.encodeHref(segments))
             respondText(call, "", HttpStatusCode.NoContent)
         } else {
             respondText(call, "403 Delete failed", HttpStatusCode.Forbidden)
@@ -314,6 +425,7 @@ class WebDavRequestHandler(
             return respondText(call, "405 Already exists", HttpStatusCode.MethodNotAllowed)
         }
         return if (storage.createDirectory(parent, leaf) != null) {
+            changeLog.record(WebDavPaths.encodeHref(segments))
             respondText(call, "", HttpStatusCode.Created)
         } else {
             respondText(call, "403 MKCOL failed", HttpStatusCode.Forbidden)
@@ -328,31 +440,68 @@ class WebDavRequestHandler(
         val depth = (call.request.headers["Depth"] ?: "1").lowercase()
         val href = if (node.isDirectory) WebDavPaths.encodeCollectionHref(segments) else WebDavPaths.encodeHref(segments)
 
+        // RFC 4918 §9.1 defines three request forms — prop / allprop / propname —
+        // and this handler used to ignore the body and answer all of them with
+        // the same fixed property set. A client asking for one property then had
+        // no way to learn it was unsupported (the answer looked like success),
+        // and one asking only for names got values it never uses. The parser
+        // treats an empty body as allprop, which is what §9.1 requires.
+        val bodyText = runCatching { call.receiveText() }.getOrDefault("")
+        val request = PropfindParser.parse(bodyText) ?: return respondDavError(
+            call, HttpStatusCode.BadRequest, reason = "Malformed propfind"
+        )
+
         val body = if (!node.isDirectory || depth == "0") {
-            WebDavXml.multistatus(
-                listOf(
-                    WebDavXml.response(
-                        href,
-                        node,
-                        storage.mimeTypeOf(node.name),
-                        extraPropstats = deadPropertiesPropstats(segments),
-                        etag = etagOf(node)
-                    )
-                )
-            )
+            propfindBody(href, node, segments, request)
         } else {
             val children = node.listChildren().sortedWith(
                 compareByDescending<DavNode> { it.isDirectory }.thenBy { it.name.lowercase() }
             )
-            WebDavXml.collectionListing(
-                href,
-                node,
-                children,
-                { storage.mimeTypeOf(it) },
-                deadPropertiesPropstats(segments),
-                etagOf = { etagOf(it) }
-            )
+            val entries = ArrayList<String>(children.size + 1)
+            when (request) {
+                is PropfindRequest.Named -> {
+                    // The requested properties, per resource. The request names
+                    // apply to every member (§9.1: the prop element describes
+                    // "what information is being requested", not per-resource),
+                    // so each child answers the same list — including its own
+                    // 404s for the properties it lacks.
+                    entries += propfindBody(href, node, segments, request).removeMultistatusWrapper()
+                    for (child in children) {
+                        val childHref = href + WebDavPaths.percentEncode(child.name) +
+                            if (child.isDirectory) "/" else ""
+                        entries += propfindBody(childHref, child, emptyList(), request).removeMultistatusWrapper()
+                    }
+                }
+                is PropfindRequest.PropName -> {
+                    // Names only, for the collection and every child (§14.21).
+                    entries += WebDavXml.multistatusEntry(
+                        href,
+                        WebDavXml.propnamePropstat(definedPropertyNames(node, segments))
+                    )
+                    for (child in children) {
+                        val childHref = href + WebDavPaths.percentEncode(child.name) +
+                            if (child.isDirectory) "/" else ""
+                        entries += WebDavXml.multistatusEntry(
+                            childHref,
+                            WebDavXml.propnamePropstat(definedPropertyNames(child, emptyList()))
+                        )
+                    }
+                }
+                is PropfindRequest.AllProp -> WebDavXml.collectionListing(
+                    href,
+                    node,
+                    children,
+                    { storage.mimeTypeOf(it) },
+                    deadPropertiesPropstats(segments),
+                    etagOf = { etagOf(it) }
+                ).also { return respondMultistatus(call, it, depth) }
+            }
+            WebDavXml.multistatus(entries)
         }
+        return respondMultistatus(call, body, depth)
+    }
+
+    private suspend fun respondMultistatus(call: ApplicationCall, body: String, depth: String): Boolean {
         call.response.header("Depth", depth)
         respondText(
             call,
@@ -361,6 +510,262 @@ class WebDavRequestHandler(
             HttpStatusCode.MultiStatus
         )
         return true
+    }
+
+    /**
+     * Unwraps the single-response `<D:multistatus>` that [propfindBody] returns
+     * so a Depth-1 listing can splice it among its siblings.
+     *
+     * The alternatives were worse: a second code path that builds responses
+     * without a wrapper would drift from the single-resource one (the two must
+     * agree on found/missing propstat order, or a client sees different shapes
+     * at Depth 0 and Depth 1), and threading a "wrap or not" flag through every
+     * branch puts the caller's concern inside the builder.
+     */
+    private fun String.removeMultistatusWrapper(): String {
+        val open = "<D:multistatus xmlns:D=\"DAV:\">"
+        val close = "</D:multistatus>"
+        return substringAfter(open).removeSuffix(close)
+    }
+
+    /**
+     * The `<D:response>` for one resource under [request]: the live properties
+     * this server computes, the dead ones from [DavPropertyStore], and — in a
+     * `prop` request — a 404 propstat for the names it was asked for but has
+     * nothing to return (RFC 4918 §9.1 requires the miss be *noted*, not
+     * swallowed). `allprop` and `propname` never produce a 404: allprop means
+     * "what you have" and propname means "names only".
+     */
+    private fun propfindBody(
+        href: String,
+        node: DavNode,
+        segments: List<String>,
+        request: PropfindRequest
+    ): String {
+        val deadPropstats = deadPropertiesPropstats(segments)
+        return when (request) {
+            is PropfindRequest.PropName -> WebDavXml.multistatus(
+                listOf(
+                    WebDavXml.multistatusEntry(href, WebDavXml.propnamePropstat(definedPropertyNames(node, segments)))
+                )
+            )
+            is PropfindRequest.Named -> {
+                val live = livePropertyMap(node)
+                val found = ArrayList<WebDavXml.QualifiedName>()
+                val missing = ArrayList<WebDavXml.QualifiedName>()
+                val textValues = ArrayList<Pair<WebDavXml.QualifiedName, String>>()
+                var rawXml: String? = null
+                for (name in request.names) {
+                    val deadValue = propertyStore.all(DavPropertyStore.keyOf(segments))[DavPropertyStore.keyOf(name)]
+                    when {
+                        deadValue != null -> {
+                            // A dead property the client stored earlier: same
+                            // name it wrote, echoed with a usable prefix.
+                            val prefix = if (name.namespaceUri.isEmpty()) "" else "p${found.size + missing.size}"
+                            textValues += WebDavXml.QualifiedName(prefix, name.local).also {
+                                it.namespaceUri = name.namespaceUri
+                            } to deadValue
+                            found += name
+                        }
+                        name.namespaceUri == WebDavXml.DAV_NS && name.local == "supported-report-set" -> {
+                            // Carries nested elements rather than text, so it is
+                            // appended raw — [deadPropertiesPropstat] would
+                            // escape its angle brackets into text.
+                            rawXml = WebDavXml.supportedReportSet()
+                            found += name
+                        }
+                        name.namespaceUri == WebDavXml.DAV_NS && live.containsKey(name.local) -> {
+                            textValues += name to live[name.local]!!
+                            found += name
+                        }
+                        else -> missing += name
+                    }
+                }
+                val propstats = ArrayList<String>()
+                if (textValues.isNotEmpty()) {
+                    propstats += WebDavXml.deadPropertiesPropstat(textValues)
+                }
+                if (rawXml != null) {
+                    // The one propstat whose value is itself XML; everything
+                    // else in this branch goes through the escaping builder.
+                    propstats += "<D:propstat><D:prop>$rawXml</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+                }
+                if (missing.isNotEmpty()) {
+                    propstats += WebDavXml.notFoundPropstat(missing)
+                }
+                WebDavXml.multistatus(listOf(WebDavXml.multistatusEntry(href, propstats.joinToString(""))))
+            }
+            is PropfindRequest.AllProp -> WebDavXml.multistatus(
+                listOf(
+                    WebDavXml.response(
+                        href,
+                        node,
+                        storage.mimeTypeOf(node.name),
+                        extraPropstats = deadPropstats,
+                        etag = etagOf(node)
+                    )
+                )
+            )
+        }
+    }
+
+    /**
+     * The live properties this server computes for [node], as text values.
+     *
+     * This is the single definition of "what allprop returns" — the XML emitter
+     * lays them out, and a `prop` request matches names against this map so the
+     * two modes can never disagree about what exists.
+     */
+    private fun livePropertyMap(node: DavNode): Map<String, String> = buildMap {
+        put("displayname", node.name)
+        put("iscollection", if (node.isDirectory) "1" else "0")
+        put("getlastmodified", WebDavXml.httpDate(node.lastModified))
+        put("creationdate", WebDavXml.isoDate(node.lastModified))
+        if (!node.isDirectory) {
+            put("getcontentlength", node.length.toString())
+            put("getcontenttype", storage.mimeTypeOf(node.name))
+            put("getetag", etagOf(node))
+        }
+        put("resourcetype", if (node.isDirectory) "<D:collection/>" else "")
+        put("lockdiscovery", "")
+    }
+
+    /** Every property name defined on [node], for `propname` mode. */
+    private fun definedPropertyNames(node: DavNode, segments: List<String>): List<WebDavXml.QualifiedName> {
+        val names = ArrayList<WebDavXml.QualifiedName>()
+        for (local in livePropertyMap(node).keys) {
+            names += WebDavXml.QualifiedName("D", local).also { it.namespaceUri = WebDavXml.DAV_NS }
+        }
+        for (storageKey in propertyStore.all(DavPropertyStore.keyOf(segments)).keys) {
+            names += WebDavXml.QualifiedName(
+                "p${names.size}",
+                DavPropertyStore.localOf(storageKey)
+            ).also { it.namespaceUri = DavPropertyStore.namespaceOf(storageKey) }
+        }
+        return names
+    }
+
+    /**
+     * REPORT (RFC 3253 §3.6) — this server implements exactly one, the
+     * `DAV:sync-collection` report of RFC 6578, which is how a sync client asks
+     * "what changed since the token you gave me" instead of re-listing the whole
+     * tree and diffing.
+     *
+     * Everything §3.2 pins down and where it is enforced here:
+     *  - request-URI must be a collection (404/405 path below);
+     *  - Depth must be 0 (other values are a 400 — the report is about the
+     *    collection's members, and `sync-level` scopes it, not Depth);
+     *  - the body must parse as `sync-collection` with a sync-token, a
+     *    sync-level and a prop;
+     *  - an unrecognised token is the `DAV:valid-sync-token` precondition, 412
+     *    — that is the client's cue to fall back to an initial (empty-token)
+     *    sync, and it fires after every restart because the log is in-memory by
+     *    design (see [ChangeLog]);
+     *  - changed members carry a propstat, removed ones a bare 404 status.
+     */
+    private suspend fun handleReport(call: ApplicationCall): Boolean {
+        val segments = WebDavPaths.normalize(state.path) ?: return rejectPath(call)
+        if (segments.size > 1) {
+            // Only the root is a synchronized collection in this server; the
+            // RFC 6578 §3.3 "child collection without the report" answer is a
+            // 403 with `supported-report`, not a 404, so a client can tell the
+            // difference from "no such path".
+            return respondDavError(
+                call, HttpStatusCode.Forbidden,
+                WebDavXml.Conditions.SUPPORTED_REPORT,
+                reason = "sync-collection is only supported on the shared root"
+            )
+        }
+        val collection = storage.node(segments) ?: return respondDavError(
+            call, HttpStatusCode.NotFound, reason = "Not Found"
+        )
+        if (!collection.isDirectory) {
+            return respondDavError(call, HttpStatusCode.Conflict, reason = "REPORT target is not a collection")
+        }
+        val depth = (call.request.headers["Depth"] ?: "0").lowercase()
+        if (depth != "0") {
+            return respondDavError(call, HttpStatusCode.BadRequest, reason = "REPORT requires Depth: 0")
+        }
+        val bodyText = runCatching { call.receiveText() }.getOrDefault("")
+        val request = SyncCollectionParser.parse(bodyText) ?: return respondDavError(
+            call, HttpStatusCode.BadRequest, reason = "Malformed sync-collection"
+        )
+        val requestedToken = request.syncToken?.let { tokenValueOf(it) }
+        if (request.syncToken != null && requestedToken == null) {
+            // Not a token this server issued (or one from before a restart):
+            // RFC 6578 §3.2's DAV:valid-sync-token precondition.
+            return preconditionFailed(call, "valid-sync-token")
+        }
+        val since = requestedToken ?: 0L
+        val (changedPaths, newToken) = changeLog.changesSince("/", since)
+        val changed = ArrayList<Pair<String, String>>()
+        val deleted = ArrayList<String>()
+        for (path in changedPaths) {
+            val memberSegments = WebDavPaths.normalize(path) ?: continue
+            val member = storage.node(memberSegments)
+            if (member == null) {
+                deleted += path
+            } else {
+                changed += path to syncPropstat(member, memberSegments, request.propNames)
+            }
+        }
+        respondText(
+            call,
+            WebDavXml.syncResponse("/", changed, deleted, syncTokenOf(newToken)),
+            io.ktor.http.ContentType.parse("application/xml; charset=utf-8"),
+            HttpStatusCode.MultiStatus
+        )
+        return true
+    }
+
+    /**
+     * The propstat for one changed member of a sync report: exactly the
+     * properties the request named, values included. RFC 6578 §3.2 requires at
+     * least one propstat for a changed member, and the report's point is that
+     * the client does not have to come back with a PROPFIND per member.
+     */
+    private fun syncPropstat(node: DavNode, segments: List<String>, names: List<WebDavXml.QualifiedName>): String {
+        val live = livePropertyMap(node)
+        val dead = propertyStore.all(DavPropertyStore.keyOf(segments))
+        val requested = ArrayList<Pair<WebDavXml.QualifiedName, String>>()
+        var synthetic = 0
+        for (name in names) {
+            val deadValue = dead[DavPropertyStore.keyOf(name)]
+            when {
+                deadValue != null -> requested += WebDavXml.QualifiedName("p${synthetic++}", name.local).also {
+                    it.namespaceUri = name.namespaceUri
+                } to deadValue
+                name.namespaceUri == WebDavXml.DAV_NS && name.local == "getetag" ->
+                    requested += name to etagOf(node)
+                name.namespaceUri == WebDavXml.DAV_NS && live.containsKey(name.local) ->
+                    requested += name to live[name.local]!!
+                // An unknown name in a sync report gets no entry at all rather
+                // than a 404 propstat: §3.2's shape for a changed member is
+                // "at least one propstat", and a missing property here means
+                // the member changed in a way the client can re-PROPFIND.
+            }
+        }
+        if (requested.isEmpty()) {
+            // A changed member must carry *something*; getlastmodified+getetag
+            // is the minimum a sync client compares.
+            requested += WebDavXml.QualifiedName("D", "getlastmodified").also { it.namespaceUri = WebDavXml.DAV_NS } to
+                WebDavXml.httpDate(node.lastModified)
+            requested += WebDavXml.QualifiedName("D", "getetag").also { it.namespaceUri = WebDavXml.DAV_NS } to
+                etagOf(node)
+        }
+        return WebDavXml.deadPropertiesPropstat(requested)
+    }
+
+    /** The sync-token URI for sequence [value] (RFC 6578 §3.2: token MUST be a URI). */
+    private fun syncTokenOf(value: Long): String = "$SYNC_TOKEN_BASE$value"
+
+    /** The sequence encoded in [token], or null when this server did not issue it. */
+    private fun tokenValueOf(token: String): Long? =
+        token.removePrefix(SYNC_TOKEN_BASE).toLongOrNull()?.takeIf { it >= 0 }
+
+    private companion object {
+        const val DEFAULT_MAX_UPLOAD_BYTES = 512L * 1024 * 1024
+        const val SYNC_TOKEN_BASE = "https://jingjiangze.otgdrivebridge/ns#sync/"
     }
 
     /**
@@ -478,6 +883,9 @@ class WebDavRequestHandler(
             io.ktor.http.ContentType.parse("application/xml; charset=utf-8"),
             HttpStatusCode.MultiStatus
         )
+        // Dead properties are data a sync client can read back; a change to
+        // them is a change to the resource's state worth reporting.
+        if (stored.isNotEmpty()) changeLog.record(WebDavPaths.encodeHref(segments))
         return true
     }
 
@@ -556,6 +964,12 @@ class WebDavRequestHandler(
             storage.copy(node, destinationDir, destLeaf)
         }
         return if (ok) {
+            // A MOVE changes both names; a COPY adds one. Recording both sides
+            // is what lets a sync report show the source disappearing.
+            if (isMove) changeLog.record(WebDavPaths.encodeHref(segments))
+            changeLog.record(
+                WebDavPaths.encodeHref(if (destIsDirectory) destSegments + destLeaf else destSegments)
+            )
             respondText(
                 call,
                 "",
