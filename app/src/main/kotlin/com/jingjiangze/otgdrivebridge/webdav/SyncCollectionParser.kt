@@ -3,7 +3,6 @@ package com.jingjiangze.otgdrivebridge.webdav
 import java.io.ByteArrayInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Element
-import org.w3c.dom.Node
 import org.xml.sax.InputSource
 
 /**
@@ -40,8 +39,6 @@ data class SyncCollectionRequest(
  */
 object SyncCollectionParser {
 
-    private const val DAV_NS = "DAV:"
-
     fun parse(body: String): SyncCollectionRequest? {
         if (body.isBlank()) return null
         val document = runCatching {
@@ -51,14 +48,18 @@ object SyncCollectionParser {
             factory.newDocumentBuilder().parse(InputSource(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))))
         }.getOrNull() ?: return null
         val root = document.documentElement ?: return null
-        if (root.namespaceURI != DAV_NS || root.localName != "sync-collection") return null
+        if (root.namespaceURI != WebDavXml.DAV_NS || root.localName != "sync-collection") return null
 
         var token: String? = null
         var tokenSeen = false
         var level: String? = null
         val propNames = ArrayList<WebDavXml.QualifiedName>()
-        for (child in root.childNodes) {
-            if (child !is Element || child.namespaceURI != DAV_NS) continue
+        // NodeList is not Iterable in Kotlin, so this walks by index — see
+        // PropfindParser for why.
+        val children = root.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child !is Element || child.namespaceURI != WebDavXml.DAV_NS) continue
             when (child.localName) {
                 "sync-token" -> {
                     tokenSeen = true
@@ -66,7 +67,9 @@ object SyncCollectionParser {
                 }
                 "sync-level" -> level = child.textContent.trim()
                 "prop" -> {
-                    for (node in child.childNodes) {
+                    val props = child.childNodes
+                    for (k in 0 until props.length) {
+                        val node = props.item(k)
                         if (node is Element) {
                             propNames += WebDavXml.QualifiedName(node.prefix ?: "", node.localName ?: node.nodeName)
                                 .apply { namespaceUri = node.namespaceURI ?: "" }

@@ -433,6 +433,18 @@ object WebDavXml {
     const val DAV_HEADER = "1, 2"
 
     /**
+     * The WebDAV namespace URI.
+     *
+     * Public because a property's identity is its namespace-qualified name, so
+     * every caller that has to decide "is this `DAV:getetag`, or something a
+     * client made up?" needs to compare against this. Duplicating the literal
+     * in each parser is how two of them drift apart — the three parsers in this
+     * package each carried their own private copy, and the handler could not
+     * see any of them.
+     */
+    const val DAV_NS = "DAV:"
+
+    /**
      * RFC 4918 §16 condition codes — the **complete** set that document defines
      * in the `DAV:` namespace.
      *

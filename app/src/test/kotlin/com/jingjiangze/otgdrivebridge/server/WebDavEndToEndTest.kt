@@ -1057,6 +1057,35 @@ class WebDavEndToEndTest {
         assertFalse(xml.contains("404"), xml)
     }
 
+    @Test
+    fun `a collection's resourcetype is a child element, not escaped text`() = runBlocking {
+        // resourcetype is the one live property whose value is markup: RFC 4918
+        // §15.9 gives a collection `<D:collection/>` *inside* the property. It
+        // shares a code path with the text-valued properties, and a builder
+        // that escapes would emit `&lt;D:collection/&gt;` — which is not
+        // "a collection", it is a file whose resourcetype is that string. Every
+        // conforming client would then treat the shared root as a file.
+        val collection = authorizedRequest("PROPFIND", "/") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>""")
+            header("Depth", "0")
+        }.bodyAsText()
+        assertTrue(collection.contains("<D:resourcetype><D:collection/></D:resourcetype>"), collection)
+        assertFalse(collection.contains("&lt;D:collection"), collection)
+
+        authorizedRequest("PUT", "/rt-file.txt") { setBody("x") }
+        val file = authorizedRequest("PROPFIND", "/rt-file.txt") {
+            setBody("""<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>""")
+            header("Depth", "0")
+        }.bodyAsText()
+        // A file is still *defined* on the property — an empty element — not a
+        // 404: "this resource has no resourcetype" and "not a collection" are
+        // different answers, and §9.1 only allows 404 for a property that is
+        // not defined.
+        assertFalse(file.contains("404"), file)
+        assertTrue(file.contains("<D:resourcetype"), file)
+        assertFalse(file.contains("<D:collection/>"), file)
+    }
+
     // ------------------------------------------------- sync-collection REPORT
 
     private suspend fun syncReport(token: String?): io.ktor.client.statement.HttpResponse =

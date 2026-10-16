@@ -48,8 +48,6 @@ sealed class PropfindRequest {
  */
 object PropfindParser {
 
-    private const val DAV_NS = "DAV:"
-
     fun parse(body: String): PropfindRequest? {
         // The empty-body rule of §9.1 — allprop, verbatim.
         if (body.isBlank()) return PropfindRequest.AllProp
@@ -62,13 +60,19 @@ object PropfindParser {
             factory.newDocumentBuilder().parse(InputSource(ByteArrayInputStream(body.toByteArray(Charsets.UTF_8))))
         }.getOrNull() ?: return null
         val root = document.documentElement ?: return null
-        if (root.namespaceURI != DAV_NS) return null
+        if (root.namespaceURI != WebDavXml.DAV_NS) return null
         return when (root.localName) {
             "allprop" -> PropfindRequest.AllProp
             "propname" -> PropfindRequest.PropName
             "prop" -> {
                 val names = ArrayList<WebDavXml.QualifiedName>()
-                for (node in root.childNodes) {
+                // childNodes is an org.w3c.dom.NodeList, which is neither a
+                // Kotlin Iterable nor a Java Iterable: `for (node in …)` does
+                // not resolve, and the extension that does resolve is
+                // ambiguous. Indexed access is the portable form.
+                val children = root.childNodes
+                for (i in 0 until children.length) {
+                    val node = children.item(i)
                     if (node is Element) {
                         names += WebDavXml.QualifiedName(node.prefix ?: "", node.localName ?: node.nodeName).apply {
                             namespaceUri = node.namespaceURI ?: ""

@@ -10,6 +10,7 @@ import com.jingjiangze.otgdrivebridge.webdav.LockManager
 import com.jingjiangze.otgdrivebridge.webdav.PropfindParser
 import com.jingjiangze.otgdrivebridge.webdav.ProppatchParser
 import com.jingjiangze.otgdrivebridge.webdav.PropfindRequest
+import com.jingjiangze.otgdrivebridge.webdav.SyncCollectionParser
 import com.jingjiangze.otgdrivebridge.webdav.WebDavPaths
 import com.jingjiangze.otgdrivebridge.webdav.WebDavXml
 import io.ktor.http.ContentType
@@ -554,7 +555,11 @@ class WebDavRequestHandler(
                 val found = ArrayList<WebDavXml.QualifiedName>()
                 val missing = ArrayList<WebDavXml.QualifiedName>()
                 val textValues = ArrayList<Pair<WebDavXml.QualifiedName, String>>()
-                var rawXml: String? = null
+                // Properties whose value is markup rather than text. They go
+                // out through a separate propstat because the text builder
+                // escapes, and an escaped `<D:collection/>` is a different
+                // property value from a collection marker.
+                val rawXml = ArrayList<String>()
                 for (name in request.names) {
                     val deadValue = propertyStore.all(DavPropertyStore.keyOf(segments))[DavPropertyStore.keyOf(name)]
                     when {
@@ -568,10 +573,11 @@ class WebDavRequestHandler(
                             found += name
                         }
                         name.namespaceUri == WebDavXml.DAV_NS && name.local == "supported-report-set" -> {
-                            // Carries nested elements rather than text, so it is
-                            // appended raw — [deadPropertiesPropstat] would
-                            // escape its angle brackets into text.
-                            rawXml = WebDavXml.supportedReportSet()
+                            rawXml += WebDavXml.supportedReportSet()
+                            found += name
+                        }
+                        name.namespaceUri == WebDavXml.DAV_NS && name.local == "resourcetype" -> {
+                            rawXml += resourcetypeXml(node)
                             found += name
                         }
                         name.namespaceUri == WebDavXml.DAV_NS && live.containsKey(name.local) -> {
@@ -585,10 +591,9 @@ class WebDavRequestHandler(
                 if (textValues.isNotEmpty()) {
                     propstats += WebDavXml.deadPropertiesPropstat(textValues)
                 }
-                if (rawXml != null) {
-                    // The one propstat whose value is itself XML; everything
-                    // else in this branch goes through the escaping builder.
-                    propstats += "<D:propstat><D:prop>$rawXml</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+                if (rawXml.isNotEmpty()) {
+                    propstats += "<D:propstat><D:prop>${rawXml.joinToString("")}</D:prop>" +
+                        "<D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
                 }
                 if (missing.isNotEmpty()) {
                     propstats += WebDavXml.notFoundPropstat(missing)
@@ -615,6 +620,13 @@ class WebDavRequestHandler(
      * This is the single definition of "what allprop returns" — the XML emitter
      * lays them out, and a `prop` request matches names against this map so the
      * two modes can never disagree about what exists.
+     *
+     * Every value here must be **text**, because [WebDavXml.deadPropertiesPropstat]
+     * escapes what it is given. `resourcetype` is the trap: its XML form is a
+     * child element (`<D:collection/>`), so it is deliberately absent from this
+     * map and handled as raw XML by [resourcetypeXml]; putting the element in
+     * here would emit `&lt;D:collection/&gt;`, which is a *collection whose
+     * resourcetype is the seven-character string* to every conforming client.
      */
     private fun livePropertyMap(node: DavNode): Map<String, String> = buildMap {
         put("displayname", node.name)
@@ -626,9 +638,21 @@ class WebDavRequestHandler(
             put("getcontenttype", storage.mimeTypeOf(node.name))
             put("getetag", etagOf(node))
         }
-        put("resourcetype", if (node.isDirectory) "<D:collection/>" else "")
         put("lockdiscovery", "")
+        // `resourcetype` is defined on the resource either way — an empty
+        // element means "not a collection" — but its *value* is an element, not
+        // text, so it is served by resourcetypeXml().
+        put("resourcetype", "")
     }
+
+    /**
+     * The `DAV:resourcetype` value: a child element for a collection, nothing
+     * for a file. Kept out of [livePropertyMap] because a propstat builder
+     * escapes its values and this one is markup.
+     */
+    private fun resourcetypeXml(node: DavNode): String =
+        if (node.isDirectory) "<D:resourcetype><D:collection/></D:resourcetype>"
+        else "<D:resourcetype/>"
 
     /** Every property name defined on [node], for `propname` mode. */
     private fun definedPropertyNames(node: DavNode, segments: List<String>): List<WebDavXml.QualifiedName> {
@@ -1220,9 +1244,4 @@ class WebDavRequestHandler(
     }
 
     private fun readAll(stream: java.io.InputStream): ByteArray = stream.use { it.readBytes() }
-
-    companion object {
-        const val DEFAULT_MAX_UPLOAD_BYTES = 4L * 1024 * 1024 * 1024
-        const val DEFAULT_BUFFER_SIZE = 64 * 1024
-    }
 }
