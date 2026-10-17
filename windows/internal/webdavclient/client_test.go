@@ -1475,4 +1475,3 @@ func (f *fakeServer) armStale() {
 	f.forceStale = true
 	f.mu.Unlock()
 }
-

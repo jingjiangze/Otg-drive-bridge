@@ -232,7 +232,7 @@ class WebDavRequestHandler(
                 }
                 val last = range.from + slice.size - 1
                 state.status = HttpStatusCode.PartialContent.value
-                call.response.header("Content-Range", "bytes $range.from-$last/${node.length}")
+                call.response.header("Content-Range", "bytes ${range.from}-$last/${node.length}")
                 call.respondBytes(slice, ContentType.parse(mime), HttpStatusCode.PartialContent)
             }
 
