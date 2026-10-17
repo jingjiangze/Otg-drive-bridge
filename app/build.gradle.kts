@@ -4,6 +4,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// The openp2p engine AAR is a build artifact (~15 MiB of native libraries), not
+// a source file: CI downloads the latest successful `openp2p-aar` artifact into
+// app/libs/ before assembling. When it is absent the app still builds — the P2P
+// card then reports that this build has no engine (see p2p/P2pEngine.kt).
+val openP2pAar: File = file("libs/openp2p.aar")
+
 android {
     namespace = "com.jingjiangze.otgdrivebridge"
     compileSdk = 34
@@ -85,7 +91,11 @@ android {
     }
 
     sourceSets {
-        getByName("main") { java.srcDirs("src/main/kotlin") }
+        getByName("main") {
+            java.srcDirs("src/main/kotlin")
+            // Only compiled when the AAR is present; see p2p/P2pEngine.kt.
+            if (openP2pAar.exists()) java.srcDirs("src/openp2p/java")
+        }
         getByName("test") { java.srcDirs("src/test/kotlin") }
     }
 
@@ -112,6 +122,11 @@ android {
 dependencies {
     // Rewrites java.time / java.util.Base64 (API 26) down to minSdk 24.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
+    // openp2p engine (optional): only when CI downloaded the AAR. `files()`
+    // does not go through repository resolution, so FAIL_ON_PROJECT_REPOS in
+    // settings.gradle.kts does not apply.
+    if (openP2pAar.exists()) implementation(files(openP2pAar))
 
     // Ktor server — CIO engine only (smallest server stack)
     implementation("io.ktor:ktor-server-core:2.3.12")

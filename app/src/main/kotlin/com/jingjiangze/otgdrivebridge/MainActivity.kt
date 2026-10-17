@@ -23,6 +23,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -91,6 +92,11 @@ class MainActivity : ComponentActivity() {
         var tempKeys by remember {
             mutableStateOf(StorageRootRepository.registry().aliveTemporaries(System.currentTimeMillis()))
         }
+        // openp2p: the token is typed by the user (persisted privately), the node
+        // name is what the server assigned after login — the only value a peer
+        // may use as -peernode.
+        var p2pTokenInput by remember { mutableStateOf(StorageRootRepository.p2pToken() ?: "") }
+        var p2pNodeName by remember { mutableStateOf<String?>(null) }
         var transports by remember { mutableStateOf(emptyList<com.jingjiangze.otgdrivebridge.network.Transport>()) }
         var status by remember { mutableStateOf("未启动") }
         val isRunning by WebDavService.isRunning.collectAsState()
@@ -240,6 +246,78 @@ class MainActivity : ComponentActivity() {
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall
                             )
+                        }
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("异地接入（openp2p，可选）", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(4.dp))
+                    val engine = remember { com.jingjiangze.otgdrivebridge.p2p.P2pEngineFactory.create() }
+                    if (engine == null) {
+                        Text(
+                            "这个构建没有内嵌 openp2p 引擎（构建时 app/libs/openp2p.aar 不存在）。" +
+                                "带引擎的包由 Actions 的 openp2p AAR 工作流产出 AAR 后自动注入。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        Text(
+                            "手机作为被访问方只需登录 openp2p 网络；异地电脑用 openp2p 拨到本机节点名，" +
+                                "再把 WebDAV 指向 127.0.0.1:<映射端口>。仅私有 P2P（不中继他人流量）。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = p2pTokenInput,
+                            onValueChange = { p2pTokenInput = it.trim() },
+                            label = { Text("openp2p 网络 token（数字）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                val token = p2pTokenInput
+                                if (token.isEmpty() || token.any { c -> !c.isDigit() }) {
+                                    status = "token 必须是纯数字（非数字会被解析成 0，登录静默失败）"
+                                } else {
+                                    StorageRootRepository.saveP2pToken(token)
+                                    status = "openp2p 登录中…"
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        val baseDir = getExternalFilesDir(null)?.absolutePath
+                                            ?: filesDir.absolutePath
+                                        val ok = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                                            engine.start(baseDir, token, 0)
+                                        }
+                                        if (ok) {
+                                            val node = engine.nodeName()
+                                            p2pNodeName = node
+                                            status = if (node != null) {
+                                                "openp2p 已登录，节点名：$node"
+                                            } else {
+                                                "openp2p 已登录，但读不到节点名"
+                                            }
+                                        } else {
+                                            status = "openp2p 登录失败（检查 token 与网络）"
+                                        }
+                                    }
+                                }
+                            }) { Text("登录 openp2p") }
+                        }
+                        p2pNodeName?.let { node ->
+                            Spacer(Modifier.height(8.dp))
+                            Text("节点名：$node", fontFamily = FontFamily.Monospace)
+                            Text(
+                                "异地电脑执行：openp2p -node <本机名> -token <同上> -peernode $node " +
+                                    "-srcport <本地口> -dstip 127.0.0.1 -dstport 8080 -protocol tcp -sharebandwidth 0",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            OutlinedButton(onClick = {
+                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(node))
+                                status = "已复制节点名"
+                            }) { Text("复制节点名") }
                         }
                     }
                 }

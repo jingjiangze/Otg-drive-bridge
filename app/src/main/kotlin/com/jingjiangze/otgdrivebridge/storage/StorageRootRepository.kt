@@ -18,6 +18,7 @@ object StorageRootRepository {
     private const val KEY_PASSWORD = "password"
     private const val KEY_LAN_PASSKEY = "lan_passkey"
     private const val KEY_TEMPORARY_KEYS = "temporary_keys"
+    private const val KEY_P2P_TOKEN = "openp2p_token"
 
     private fun prefs() = OtgDriveBridgeApp.instance.getSharedPreferences(PREFS, 0)
 
@@ -59,6 +60,22 @@ object StorageRootRepository {
         val pass = prefs.getString(KEY_PASSWORD, null) ?: return null
         return user to pass
     }
+
+    /**
+     * The openp2p network token, as the string the engine's `runAsModule`
+     * expects. It is a credential: kept in app-private prefs like the WebDAV
+     * password, never logged, never put in the join string the UI shows.
+     * `allowBackup="false"` keeps it out of cloud backups.
+     */
+    fun saveP2pToken(token: String) {
+        if (token.isBlank()) {
+            prefs().edit().remove(KEY_P2P_TOKEN).apply()
+        } else {
+            prefs().edit().putString(KEY_P2P_TOKEN, token.trim()).apply()
+        }
+    }
+
+    fun p2pToken(): String? = prefs().getString(KEY_P2P_TOKEN, null)?.takeIf { it.isNotBlank() }
 
     /**
      * The LAN passkey, stored as one serialized `CredentialRegistry` entry (or

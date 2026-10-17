@@ -1,0 +1,78 @@
+name: Inject openp2p AAR
+description: >
+  Downloads the newest successful "openp2p AAR" workflow's artifact into
+  app/libs/, so the APK is assembled with the engine. Absent is a warning, not
+  a failure: the app builds without it and the P2P card reports the missing
+  engine (see app/src/main/kotlin/.../p2p/P2pEngine.kt).
+
+outputs:
+  injected:
+    description: "true when app/libs/openp2p.aar was placed"
+    value: ${{ steps.unpack.outputs.injected }}
+
+runs:
+  using: composite
+  steps:
+    # The download is node-side because github-script exposes the API client
+    # and token directly; `exec` is not available in that sandbox, so the
+    # unzip happens in the shell step below.
+    - name: Download openp2p-aar artifact
+      id: fetch
+      uses: actions/github-script@v7
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      with:
+        script: |
+          const fs = require('fs');
+          // Any API hiccup (a token without actions:read on a fork PR, a
+          // transient 5xx) must degrade to "build without the engine", not
+          // fail the APK job. The engine is an enhancement.
+          let runId;
+          try {
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner, repo: context.repo.repo,
+              workflow_id: 'openp2p-aar.yml', status: 'success', per_page: 1,
+            });
+            if (!runs.data.workflow_runs.length) {
+              core.warning('no successful openp2p AAR run — building without the engine');
+              return;
+            }
+            runId = runs.data.workflow_runs[0].id;
+            const arts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner, repo: context.repo.repo, run_id: runId,
+            });
+            const aar = arts.data.artifacts.find(a => a.name === 'openp2p-aar');
+            if (!aar) {
+              core.warning(`run ${runId} has no openp2p-aar artifact`);
+              return;
+            }
+            const resp = await github.rest.actions.downloadArtifact({
+              owner: context.repo.owner, repo: context.repo.repo,
+              artifact_id: aar.id, archive_format: 'zip',
+            });
+            fs.writeFileSync('openp2p-aar.zip', Buffer.from(resp.data));
+            core.info(`downloaded openp2p-aar from run ${runId}`);
+          } catch (e) {
+            core.warning(`openp2p AAR unavailable (${e.message}) — building without the engine`);
+          }
+
+    - name: Unpack into app/libs
+      id: unpack
+      shell: bash
+      run: |
+        if [ -f openp2p-aar.zip ]; then
+          mkdir -p app/libs
+          unzip -o -q openp2p-aar.zip -d app/libs
+          if [ -f app/libs/openp2p.aar ]; then
+            echo "injected=true" >> "$GITHUB_OUTPUT"
+            echo "openp2p engine: **included** ($(stat -c%s app/libs/openp2p.aar) bytes)" \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "injected=false" >> "$GITHUB_OUTPUT"
+            echo "openp2p engine: artifact did not contain openp2p.aar" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+        else
+          echo "injected=false" >> "$GITHUB_OUTPUT"
+          echo "openp2p engine: absent — APK still builds" >> "$GITHUB_STEP_SUMMARY"
+        fi

@@ -123,6 +123,19 @@ CI（`.github/workflows/ci.yml`）三个 job：
 - [ ] T7 互联网暴露安全基线（默认关、显式开启、可见告警）
 - [ ] T8 发布：签名 + Release
 
+## 异地接入（openp2p，可选）
+
+手机作为被访问方只需登录 openp2p 网络（不需要任何转发命令）；异地电脑跑 openp2p 拨到手机的
+**实际节点名**（登录时服务器可能改写配置名，UI 显示的是 `getAndroidNodeName()` 的真值），
+把 WebDAV 指向 `http://127.0.0.1:<映射端口>/` 即可走既有的鉴权。
+
+- 节点命名空间：本项目一律 `otg-<8hex>`；`ecs-*`（既有平台房间）与 `aliyun-*`（ECS 服务节点）
+  在 `windows/internal/openp2p` 的校验里直接拒绝——与现有部署零重叠是用户硬约束。
+- `-sharebandwidth 0`：私有 P2P，不中继他人流量；打不穿时不自动走公共中继。
+- AAR 不入库：`.github/workflows/openp2p-aar.yml`（手动触发）构建出 15 MiB 产物；
+  APK 构建经 `.github/actions/inject-openp2p-aar` 拉取最近一次成功产物注入 `app/libs/`。
+  没有 AAR 时 APK 照常构建，UI 明示「本构建无引擎」。
+
 ## 安全边界
 
 - 互联网暴露**默认关闭**，需要用户在 UI 里显式打开；开启后界面常驻警示。

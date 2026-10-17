@@ -17,6 +17,10 @@ local.properties
 *.hprof
 !debug.keystore
 
+# The openp2p engine AAR is downloaded into app/libs/ by CI
+# (.github/actions/inject-openp2p-aar); it is a build artifact, never committed.
+/app/libs/
+
 # Local-only verification tooling: the XML namespace checker, the call-arity
 # checker and their siblings. Developer scratch, not part of the deliverable.
 /_tmp/

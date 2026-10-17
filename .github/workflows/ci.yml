@@ -79,6 +79,12 @@ jobs:
     needs: [test, lint]
     steps:
       - uses: actions/checkout@v4
+
+      # Composite local action: pulls the latest successful openp2p AAR into
+      # app/libs/ (warning-only when absent). app/build.gradle.kts enables the
+      # optional source set and the files(...) dependency on the same condition.
+      - name: Inject openp2p AAR
+        uses: ./.github/actions/inject-openp2p-aar
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -121,6 +127,12 @@ jobs:
     needs: [test, lint]
     steps:
       - uses: actions/checkout@v4
+
+      # Composite local action: pulls the latest successful openp2p AAR into
+      # app/libs/ (warning-only when absent). app/build.gradle.kts enables the
+      # optional source set and the files(...) dependency on the same condition.
+      - name: Inject openp2p AAR
+        uses: ./.github/actions/inject-openp2p-aar
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
