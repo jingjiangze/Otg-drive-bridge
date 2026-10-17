@@ -1188,7 +1188,12 @@ class WebDavRequestHandler(
         if (h["CF-Connecting-IP"] != null || h["X-Forwarded-For"] != null || h["X-Real-IP"] != null) {
             return "proxied"
         }
-        return call.request.local.remoteHost
+        // `remoteAddress`, not `remoteHost`: the latter is the reverse-resolved
+        // hostname ("localhost" for a loopback peer on CI), and IpTrust must
+        // never trust a name — it would be doing a DNS lookup on attacker
+        // input. `remoteAddress` is the socket's literal IP, which is exactly
+        // the value the classification table is written against.
+        return call.request.local.remoteAddress
     }
 
     /**
