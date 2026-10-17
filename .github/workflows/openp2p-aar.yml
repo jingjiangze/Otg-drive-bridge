@@ -88,7 +88,11 @@ jobs:
       - name: Bind the AAR
         working-directory: ${{ runner.temp }}/openp2p/core
         run: |
-          gomobile bind -target=android -androidapi 21 \
+          # Only the two ABIs the app actually ships (app/build.gradle.kts
+          # ndk.abiFilters: arm64-v8a, plus x86_64 behind -PincludeX86=true).
+          # The default all-ABI build was 31 MiB; this keeps the artifact and
+          # the APK proportionate.
+          gomobile bind -target=android/arm64,android/amd64 -androidapi 21 \
             -o "$GITHUB_WORKSPACE/openp2p.aar" .
           ls -l "$GITHUB_WORKSPACE/openp2p.aar"
 
