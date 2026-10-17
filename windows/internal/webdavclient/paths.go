@@ -1,9 +1,44 @@
 package webdavclient
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrUnsafePath is a path the client refuses to put on the wire.
+var ErrUnsafePath = errors.New("webdav: traversal-unsafe path")
+
+// validatePath mirrors the server's traversal defence
+// (`WebDavPaths.normalize` + `isSafeSegment`): every non-empty segment,
+// percent-DECODED, is rejected when it is "." or "..", or contains a "/" or a
+// backslash. Checking the decoded form is the whole point — a literal ".."
+// is the obvious case, and `%2e%2e` is the one a naive client leaks through.
+//
+// The server answers either with a 400; refusing here costs nothing and stops
+// a bug that turns a local filesystem path into a request from reaching the
+// wire at all. What is deliberately NOT checked here, left to the server's
+// 400 so a future relaxation server-side does not strand this client:
+// Windows reserved names, trailing dots and spaces, and whole empty encoded
+// segments — those are naming conveniences, not traversal.
+func validatePath(path string) error {
+	if strings.ContainsRune(path, 0) {
+		return fmt.Errorf("%w: NUL byte in %q", ErrUnsafePath, path)
+	}
+	for _, piece := range strings.Split(path, "/") {
+		if piece == "" {
+			continue
+		}
+		decoded, err := percentDecode(piece)
+		if err != nil {
+			return fmt.Errorf("%w: segment %q does not decode: %v", ErrUnsafePath, piece, err)
+		}
+		if decoded == "." || decoded == ".." || strings.ContainsRune(decoded, '/') || strings.ContainsRune(decoded, '\\') {
+			return fmt.Errorf("%w: segment %q (decoded %q) in %q", ErrUnsafePath, piece, decoded, path)
+		}
+	}
+	return nil
+}
 
 // percentDecode decodes a percent-encoded path segment.
 //

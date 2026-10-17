@@ -146,6 +146,9 @@ func (s *Server) Do(ctx context.Context, method, path string, body io.Reader, he
 // the caller can produce a fresh reader, so the second attempt is a complete
 // request rather than a truncated one.
 func (s *Server) doReplayable(ctx context.Context, method, path string, body io.Reader, headers map[string]string, replay func() io.Reader) (*http.Response, error) {
+	if err := validatePath(path); err != nil {
+		return nil, err
+	}
 	streaming := body != nil && body != http.NoBody
 
 	// Whether a challenge has been recorded yet. The very first request of a
@@ -388,10 +391,9 @@ func (s *Server) Propfind(ctx context.Context, path, depth string) ([]Node, erro
 // Get downloads [path]. The caller owns the returned reader and must close it.
 //
 // The server sends an ETag of the form `"<lastModified>-<length>"` and
-// Last-Modified, but it does not implement Range: a `Range` header is ignored
-// and the whole body comes back with 200. There is deliberately no ResumableGet
-// here — a client that resumes must re-read the whole file and truncate locally,
-// because the server will not help.
+// Last-Modified, and since commit 1979f4f it honours a `Range` header; use
+// [Server.GetRange] for a slice, which is what hydrating a large file at random
+// offsets needs.
 func (s *Server) Get(ctx context.Context, path string) (io.ReadCloser, int64, http.Header, error) {
 	resp, err := s.Do(ctx, "GET", path, nil, nil)
 	if err != nil {
@@ -402,6 +404,162 @@ func (s *Server) Get(ctx context.Context, path string) (io.ReadCloser, int64, ht
 		return nil, 0, nil, ParseError(resp)
 	}
 	return resp.Body, resp.ContentLength, resp.Header, nil
+}
+
+// Range is one slice outcome from [Server.GetRange].
+//
+// A single three-state type rather than (body, status, error) lets the caller
+// write a switch instead of a chain of `if` on a status that has to be
+// remembered as a number.
+type Range struct {
+	// Status is 206, 200 or 416, so a caller that wants to log which happened
+	// can, without re-deriving it from the other fields.
+	Status int
+	// TotalBytes is the length of the whole resource — from `Content-Range`
+	// when present, else the response's own length. Always populated, because
+	// the fallback path (no Range support) is the one place it is otherwise
+	// unknown.
+	TotalBytes int64
+	// CompleteBytes is how much of the resource this response carries, which is
+	// the whole thing on the fallback path.
+	CompleteBytes int64
+	// FirstByte is where the carried bytes start. 0 on the fallback path.
+	FirstByte int64
+	// Body is the caller's to close. It is nil only when Status is 416.
+	Body io.ReadCloser
+	// Header is the response header, for ETag and Last-Modified, which are the
+	// same on a 206 as on a 200 and so still usable as the hydration record.
+	Header http.Header
+}
+
+// GetRange fetches [from, to] from [path] inclusive.
+//
+// The slice is requested with a single `bytes=` spec; a multi-range request is
+// deliberately not offered, because the server answers it with a full 200 and
+// the client would then have to find the part it wants in a multipart body.
+//
+// Three outcomes, all normal:
+//
+//   - 206: the server sliced. Get the boundaries back from Content-Range.
+//   - 200: the server ignored the Range header and sent everything. This is what
+//     a WebDAV endpoint answers when it does not implement Range at all, and the
+//     client must not read it as an error — it must read only what it asked for
+//     and close.
+//   - 416: the requested range can never become valid — the first byte is past
+//     the end, or the range is reversed. Content-Range is `bytes */total`.
+//
+// The 200 fallback is what makes this usable against a server that predates
+// 1979f4f: hydration still works, it just downloads more than it asked for.
+func (s *Server) GetRange(ctx context.Context, path string, from, to int64) (*Range, error) {
+	if err := validatePath(path); err != nil {
+		return nil, err
+	}
+	if from < 0 || to < 0 {
+		return nil, fmt.Errorf("webdav: negative range %d-%d", from, to)
+	}
+	if to < from {
+		return nil, fmt.Errorf("webdav: reversed range %d-%d", from, to)
+	}
+	spec, err := FormatRange(from, to)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.Do(ctx, "GET", path, nil, map[string]string{"Range": spec})
+	if err != nil {
+		return nil, err
+	}
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		slice := &Range{Status: resp.StatusCode, Body: resp.Body, Header: resp.Header, FirstByte: from}
+		first, complete, total, ok := parseContentRange(resp.Header.Get("Content-Range"))
+		if ok {
+			// The header wins over what was asked for: a server may have clamped
+			// the last byte to the resource's end.
+			slice.FirstByte, slice.CompleteBytes, slice.TotalBytes = first, complete, total
+		} else {
+			slice.CompleteBytes = resp.ContentLength
+		}
+		if slice.TotalBytes == 0 {
+			slice.TotalBytes = from + resp.ContentLength
+		}
+		return slice, nil
+	case http.StatusOK:
+		// No Range support. Everything came back; the caller must stop reading at
+		// the byte it wanted and close the rest away.
+		return &Range{
+			Status:        resp.StatusCode,
+			TotalBytes:    resp.ContentLength,
+			CompleteBytes: resp.ContentLength,
+			Body:          resp.Body,
+			Header:        resp.Header,
+		}, nil
+	case http.StatusRequestedRangeNotSatisfiable:
+		total := parseUnsatisfiableLength(resp.Header.Get("Content-Range"))
+		// ParseError reads and closes the body, which is empty here anyway.
+		if total == 0 {
+			total = -1
+		}
+		resp.Body.Close()
+		return &Range{Status: resp.StatusCode, TotalBytes: total}, nil
+	}
+	// Any other status is a real failure: 404, 401 after a retry, 500.
+	return nil, ParseError(resp)
+}
+
+// parseContentRange reads `bytes <first>-<last>-<total>` out of a Content-Range
+// header and returns the fields it actually found, ok=false when the header is
+// absent or malformed.
+//
+// `/` and `-` are matched rather than assumed, and each number is parsed
+// separately: a header with an empty or non-numeric field is treated as absent
+// rather than as zero, because a total of 0 read as real would send the caller's
+// progress arithmetic to "the file is empty".
+func parseContentRange(value string) (first, complete, total int64, ok bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, 0, false
+	}
+	const prefix = "bytes "
+	if !strings.HasPrefix(value, prefix) {
+		return 0, 0, 0, false
+	}
+	rest := strings.TrimPrefix(value, prefix)
+	dash := strings.IndexByte(rest, '-')
+	slash := strings.LastIndexByte(rest, '/')
+	if dash < 0 || slash < 0 || slash < dash {
+		return 0, 0, 0, false
+	}
+	first, err := strconv.ParseInt(strings.TrimSpace(rest[:dash]), 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	last, err := strconv.ParseInt(strings.TrimSpace(rest[dash+1:slash]), 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	total, err = strconv.ParseInt(strings.TrimSpace(rest[slash+1:]), 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	if last < first || total <= 0 {
+		return 0, 0, 0, false
+	}
+	return first, last - first + 1, total, true
+}
+
+// parseUnsatisfiableLength reads the total out of a 416's
+// `bytes */<total>`. It returns 0 when the header is absent or malformed, which
+// the caller turns into "length unknown" rather than a guess of zero.
+func parseUnsatisfiableLength(value string) int64 {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "bytes */") {
+		return 0
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(value, "bytes */")), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // Head fetches headers only, for size/date without the body.

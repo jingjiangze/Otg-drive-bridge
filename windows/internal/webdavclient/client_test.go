@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -69,6 +70,19 @@ type fakeServer struct {
 	stableNonce string
 	// stableOpaque is the opaque paired with stableNonce.
 	stableOpaque string
+	// rangeEnabled turns Range on in handleGet. It defaults to true, which is
+	// the server as of 1979f4f; the tests that need the old behaviour clear it
+	// explicitly rather than the other way round, so a new test does not
+	// silently pass against a server that ignores Range.
+	rangeEnabled bool
+	// reported is the path list handleReport answers with: an entry that exists
+	// in files is "changed", one that does not is "removed". Set by the tests
+	// that drive sync-collection, so "what changed since" is a decision the
+	// test makes instead of a side effect it infers.
+	reported []string
+	// nextToken is the token handleReport hands back, and the only token
+	// knownToken accepts besides the empty initial one.
+	nextToken string
 
 	lastSeen map[string]http.Header
 }
@@ -93,9 +107,11 @@ const (
 func newFakeServer(t *testing.T) *fakeServer {
 	t.Helper()
 	f := &fakeServer{
-		t:        t,
-		files:    map[string][]byte{},
-		lastSeen: map[string]http.Header{},
+		t:            t,
+		files:        map[string][]byte{},
+		lastSeen:     map[string]http.Header{},
+		rangeEnabled: true,
+		nextToken:    "https://jingjiangze.otgdrivebridge/ns#sync/1",
 	}
 	f.httpServer = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.httpServer.Close)
@@ -110,8 +126,12 @@ func newFakeServer(t *testing.T) *fakeServer {
 // line or panic the binary. Failures here surface as a non-200 status that the
 // assertions catch.
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
+	// EscapedPath, not Path: Path is percent-DECODED, so a client that sent
+	// `/%E4%B8%AD%E6%96%87.txt` would be recorded under `GET /中文.txt` and a
+	// test looking for what went on the wire would find nothing. Every existing
+	// key is ASCII, where the two agree, so this only fixes the encoded case.
 	f.mu.Lock()
-	f.lastSeen[r.Method+" "+r.URL.Path] = r.Header.Clone()
+	f.lastSeen[r.Method+" "+r.URL.EscapedPath()] = r.Header.Clone()
 	f.mu.Unlock()
 
 	if r.Method == http.MethodOptions {
@@ -141,6 +161,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleUnlock(w, r)
 	case "PROPPATCH":
 		f.handleProppatch(w, r)
+	case "REPORT":
+		f.handleReport(w, r)
 	default:
 		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 	}
@@ -150,7 +172,7 @@ func (f *fakeServer) writeOptions(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("DAV", "1, 2")
 	h.Set("MS-Author-Via", "DAV")
-	h.Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK")
+	h.Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK, REPORT")
 	h.Set("Accept-Ranges", "bytes")
 	w.WriteHeader(http.StatusOK)
 }
@@ -401,12 +423,145 @@ func (f *fakeServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "404 Not Found", http.StatusNotFound)
 		return
 	}
-	// WebDavRequestHandler sends an ETag but no Range support.
+	// WebDavRequestHandler sends an ETag and, since 1979f4f, honours Range.
+	// rangeEnabled=false is the pre-1979f4f server, which the 200-fallback path
+	// of GetRange exists for.
 	w.Header().Set("ETag", `"1735689600000-42"`)
 	w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.WriteHeader(http.StatusOK)
-	w.Write(body)
+	if !f.rangeEnabled || r.Header.Get("Range") == "" {
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+		return
+	}
+	from, to, ok := parseRangeHeader(r.Header.Get("Range"))
+	if !ok {
+		// An unparseable Range is ignored per RFC 9110 §14.2: full 200, not 416.
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+		return
+	}
+	if from >= int64(len(body)) {
+		w.Header().Set("Content-Range", "bytes */"+fmt.Sprint(len(body)))
+		http.Error(w, "416 Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if to >= int64(len(body)) {
+		to = int64(len(body)) - 1
+	}
+	if to < from {
+		w.Header().Set("Content-Range", "bytes */"+fmt.Sprint(len(body)))
+		http.Error(w, "416 Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	w.Header().Set("Content-Range",
+		fmt.Sprintf("bytes %d-%d/%d", from, to, len(body)))
+	w.WriteHeader(http.StatusPartialContent)
+	w.Write(body[from : to+1])
+}
+
+// parseRangeHeader reads the single-range `bytes=from-to` form the client sends.
+// ok=false for anything else, which the caller treats as "no usable Range" —
+// the same ignore-and-send-everything behaviour RFC 9110 §14.2 requires of a
+// server that does not understand what it was given.
+func parseRangeHeader(value string) (from, to int64, ok bool) {
+	if !strings.HasPrefix(value, "bytes=") {
+		return 0, 0, false
+	}
+	rest := strings.TrimPrefix(value, "bytes=")
+	dash := strings.IndexByte(rest, '-')
+	if dash < 0 {
+		return 0, 0, false
+	}
+	from, err := strconv.ParseInt(rest[:dash], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	to, err = strconv.ParseInt(rest[dash+1:], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return from, to, true
+}
+
+// handleReport answers the sync-collection report (RFC 6578) the way the Kotlin
+// server does, including the parts that are only visible by driving them:
+//
+//   - Depth: 0 is enforced; anything else is a 400
+//   - a non-root request-URI is a 403 with `supported-report`, not a 404
+//   - an unknown token is 412 DAV:valid-sync-token — the client's cue to
+//     re-sync from scratch, and what happens after every server restart
+//   - changed members carry a propstat, removed ones a bare 404
+//   - the token is emitted once on the multistatus, outside every response
+//
+// The change set is derived from [fakeServer.reported] when set, so a test can
+// decide what "changed since" means rather than having to write to the fake and
+// infer it.
+func (f *fakeServer) handleReport(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.Error(w, "403 sync-collection is only supported on the shared root",
+			http.StatusForbidden)
+		return
+	}
+	if depth := r.Header.Get("Depth"); depth != "" && depth != "0" {
+		http.Error(w, "400 REPORT requires Depth: 0", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "400 malformed sync-collection", http.StatusBadRequest)
+		return
+	}
+	root, err := parseXML(string(body))
+	if err != nil || root.name != "sync-collection" {
+		http.Error(w, "400 malformed sync-collection", http.StatusBadRequest)
+		return
+	}
+	token := strings.TrimSpace(root.findText("sync-token"))
+	if token != "" && !f.knownToken(token) {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusPreconditionFailed)
+		fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><D:error xmlns:D="DAV:">`+
+			`<D:valid-sync-token/></D:error>`)
+		return
+	}
+	f.mu.Lock()
+	changed := append([]string(nil), f.reported...)
+	next := f.nextToken
+	f.mu.Unlock()
+
+	var entries strings.Builder
+	for _, path := range changed {
+		f.mu.Lock()
+		body, ok := f.files[path]
+		f.mu.Unlock()
+		if !ok {
+			// Removed: bare 404, no propstat. That asymmetry is how a sync
+			// client tells "gone" from "changed".
+			entries.WriteString(`<D:response><D:href>` + path + `</D:href>` +
+				`<D:status>HTTP/1.1 404 Not Found</D:status></D:response>`)
+			continue
+		}
+		entries.WriteString(`<D:response><D:href>` + path + `</D:href>` +
+			`<D:propstat><D:prop>` +
+			`<D:getetag>"1735689600000-` + fmt.Sprint(len(body)) + `"</D:getetag>` +
+			`<D:getcontentlength>` + fmt.Sprint(len(body)) + `</D:getcontentlength>` +
+			`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusMultiStatus)
+	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">`+
+		entries.String()+`<D:sync-token>`+next+`</D:sync-token></D:multistatus>`)
+}
+
+// knownToken accepts the token this fake issued and the empty initial-sync
+// token, and nothing else. A client that built its own token from the digits it
+// saw must be refused — that is the 412 path, and a fake that accepted anything
+// would make the test unable to see it.
+func (f *fakeServer) knownToken(token string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return token == "" || token == f.nextToken
 }
 
 func (f *fakeServer) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -1320,3 +1475,4 @@ func (f *fakeServer) armStale() {
 	f.forceStale = true
 	f.mu.Unlock()
 }
+
