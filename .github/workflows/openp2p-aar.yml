@@ -77,6 +77,14 @@ jobs:
             https://github.com/openp2p-cn/openp2p.git "$RUNNER_TEMP/openp2p"
           git -C "$RUNNER_TEMP/openp2p" rev-parse HEAD
 
+      # The upstream README's third step, and not optional: gobind resolves the
+      # runtime support package from the *target module's* requirements, and
+      # openp2p's go.mod does not list golang.org/x/mobile/bind. Without this
+      # the bind step dies with "no Go package in golang.org/x/mobile/bind".
+      - name: Add the bind runtime to the engine module
+        working-directory: ${{ runner.temp }}/openp2p/core
+        run: go get golang.org/x/mobile/bind@7c4916698cc93475ebfea76748ee0faba2deb2a5
+
       - name: Bind the AAR
         working-directory: ${{ runner.temp }}/openp2p/core
         run: |
