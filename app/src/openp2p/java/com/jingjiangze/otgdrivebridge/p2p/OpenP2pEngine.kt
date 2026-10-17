@@ -26,8 +26,14 @@ class OpenP2pEngine : P2pEngine {
     override fun start(baseDir: String, token: String, shareBandwidthMbps: Int): Boolean {
         if (token.isBlank()) return false
         return runCatching {
-            // gomobile maps Go `int` to Java `int` — pass Ints, not Longs.
-            val net = Openp2p.runAsModule(baseDir, token, shareBandwidthMbps, 1)
+            // gomobile maps Go `int` to Java `long` (Go int is 64-bit on
+            // android/arm64) — verified by the compiler, not guessed: passing
+            // Ints here fails with "actual type is 'kotlin.Int', but
+            // 'kotlin.Long' was expected". Upstream's literal call
+            // `runAsModule(dir, token, 0, 1)` works because Kotlin types the
+            // literals contextually; we pass values, so they need explicit
+            // Longs.
+            val net = Openp2p.runAsModule(baseDir, token, shareBandwidthMbps.toLong(), 1L)
             network = net
             net.connect(LOGIN_TIMEOUT_MS)
         }.getOrDefault(false)
@@ -38,6 +44,6 @@ class OpenP2pEngine : P2pEngine {
     }.getOrNull()?.takeIf { it.isNotBlank() && it != "unknown" }
 
     private companion object {
-        const val LOGIN_TIMEOUT_MS = 30_000
+        const val LOGIN_TIMEOUT_MS = 30_000L
     }
 }
