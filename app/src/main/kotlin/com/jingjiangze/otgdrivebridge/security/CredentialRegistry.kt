@@ -147,24 +147,33 @@ class CredentialRegistry private constructor(
 /**
  * Origin classification for the trust decision, deliberately literal-only.
  *
- * [IpTrust.isLocalOrigin] answers "could this address be a peer on the same
- * network?" **without any DNS**: a hostname, an IPv6 with a zone id, or a
- * non-literal spelling is never local. Reverse-resolving the peer would let an
- * attacker with a PTR record claim to be 127.0.0.1, which is the whole
- * security model, so the check refuses to do name resolution at all.
+ * [IpTrust.isLocalOrigin] answers "is this a peer on the same network?"
+ * **without any DNS**: a hostname, an IPv6 with a zone id, or a non-literal
+ * spelling is never local. Reverse-resolving the peer would let an attacker
+ * with a PTR record claim to be local, which is the whole security model, so
+ * the check refuses to do name resolution at all.
  *
- * Accepted: IPv4 loopback and the three RFC-1918 blocks, IPv6 `::1` and the
- * unique-local `fc00::/7` range. Link-local (`fe80::`) is *not* accepted:
- * every interface can talk to its own link-local space, which makes it the
- * wrong place to hang trust on a phone with Wi-Fi, hotspot and cellular up at
- * the same time.
+ * Accepted: the three RFC-1918 IPv4 blocks and the IPv6 unique-local
+ * `fc00::/7` range. Deliberately **not** accepted:
+ *
+ *  - **Loopback.** A genuine peer on the network can never present a loopback
+ *    source address; the only things that do are *local proxies* — cloudflared
+ *    and netbird-expose run on the phone and forward to `127.0.0.1:8080`, so
+ *    trusting loopback would hand the LAN passkey to the whole Internet the
+ *    moment an exposure is active, and a future transport (e.g. an openp2p
+ *    listener) could reintroduce the same hole. Same-device clients use the
+ *    primary account instead; nothing real is lost.
+ *  - **Link-local** (`169.254/16`, `fe80::/10`): every interface can talk to
+ *    its own link-local space, the wrong place to hang trust on a phone with
+ *    Wi-Fi, hotspot and cellular up at once.
+ *  - **CGNAT** (`100.64/10`, the range NetBird/tailnets use): "reachable but
+ *    private" is not "same Wi-Fi", which is the only thing the passkey means.
  */
 object IpTrust {
 
     fun isLocalOrigin(host: String): Boolean {
         val h = host.trim().removePrefix("/").substringBefore('%').lowercase()
         if (h.isEmpty()) return false
-        if (h == "::1" || h == "0:0:0:0:0:0:0:1") return true
         if (h.startsWith("fc") || h.startsWith("fd")) return isIpv6Literal(h)
         val octets = h.split('.')
         if (octets.size != 4) return false
@@ -180,9 +189,8 @@ object IpTrust {
         }
         val a = octets[0].toInt()
         val b = octets[1].toInt()
-        // 10/8 · 192.168/16 · 172.16-31/12 · 127/8
-        return a == 10 || (a == 192 && b == 168) ||
-            (a == 172 && b in 16..31) || a == 127
+        // 10/8 · 192.168/16 · 172.16-31/12 — and nothing else.
+        return a == 10 || (a == 192 && b == 168) || (a == 172 && b in 16..31)
     }
 
     /**

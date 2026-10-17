@@ -16,7 +16,7 @@ class CredentialRegistryTest {
 
     @Test
     fun `site-local literals are local`() {
-        for (host in listOf("127.0.0.1", "10.1.2.3", "192.168.4.20", "172.16.0.1", "172.31.255.255", "::1", "fc12::34", "fd00::1")) {
+        for (host in listOf("10.1.2.3", "192.168.4.20", "172.16.0.1", "172.31.255.255", "fc12::34", "fd00::1")) {
             assertTrue(IpTrust.isLocalOrigin(host), "$host should be local")
         }
     }
@@ -29,6 +29,9 @@ class CredentialRegistryTest {
             "169.254.1.1",          // link-local IPv4
             "fe80::1",              // link-local IPv6 — every interface has one
             "100.64.0.1",           // CGNAT / tailnet space: *not* same-Wi-Fi
+            "127.0.0.1",            // loopback — see below
+            "::1",
+            "0:0:0:0:0:0:0:1",
             "010.0.0.1",            // leading zero: parses differently per stack
             "10.0.0.1.7",           // five octets
             "10.0.0.999",           // octet out of range
@@ -39,6 +42,18 @@ class CredentialRegistryTest {
         )) {
             assertFalse(IpTrust.isLocalOrigin(host), "$host must not be trusted as local")
         }
+    }
+
+    @Test
+    fun `loopback is never a LAN peer`() {
+        // This is the tunnel hole in one assertion. cloudflared and netbird
+        // proxy to 127.0.0.1, and a future openp2p port-forward would too; if
+        // loopback counted as "same Wi-Fi", the LAN passkey would be usable by
+        // anyone reaching the public URL. A real LAN peer always arrives with
+        // its own site-local address, so nothing legitimate is lost.
+        assertFalse(IpTrust.isLocalOrigin("127.0.0.1"))
+        assertFalse(IpTrust.isLocalOrigin("127.1.2.3"))
+        assertFalse(IpTrust.isLocalOrigin("::1"))
     }
 
     @Test

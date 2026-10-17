@@ -16,8 +16,11 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.nio.file.Files
 
 /**
@@ -26,11 +29,19 @@ import java.nio.file.Files
  * as `stale=true`, and rotating a credential takes effect on the *next*
  * request without restarting the service.
  *
- * The origin *classification* itself (IpTrust) is exhaustively unit-tested in
- * [com.jingjiangze.otgdrivebridge.security.CredentialRegistryTest]; a loopback
- * Ktor server can only ever see 127.0.0.1, so what this file proves is that
- * the registry's candidate list is actually consulted per request and that the
- * Digest engine accepts any one of several accounts.
+ * Connectivity note: the server is bound to (and the client connects through)
+ * the machine's **site-local** address, not loopback. That is not cosmetic —
+ * loopback is deliberately excluded from the LAN trust tier (proxies and
+ * port-forwards terminate on `127.0.0.1`, so trusting it would leak the LAN
+ * passkey to the Internet; see [IpTrust]). A CI runner usually has a `10.x` or
+ * `172.17.x` interface, so the LAN cases run for real; a machine with no
+ * site-local address skips them instead of asserting a lie.
+ *
+ * The origin *classification* itself is exhaustively unit-tested in
+ * [com.jingjiangze.otgdrivebridge.security.CredentialRegistryTest]; this file
+ * proves the registry's candidate list is consulted per request, that the
+ * Digest engine accepts any one of several accounts, and that the peer address
+ * Ktor actually reports lands in the right trust tier.
  */
 class WebDavAuthSchemeTest {
 
@@ -38,12 +49,26 @@ class WebDavAuthSchemeTest {
         const val PORT = 18081
         const val PRIMARY_USER = "otg"
         const val PRIMARY_PASS = "PrimaryPassw0rd"
+
+        /** First site-local IPv4 of this host, or null when it has none. */
+        fun siteLocalIpv4(): String? = NetworkInterface.getNetworkInterfaces()
+            .asSequence()
+            .flatMap { it.inetAddresses.asSequence() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { it.isSiteLocalAddress && !it.isLoopbackAddress }
+            ?.hostAddress
     }
 
     private lateinit var root: java.io.File
     private lateinit var server: ServerBootstrap.StartedServer
     private lateinit var client: HttpClient
     private val authenticator = DigestAuthenticator()
+
+    /** The address the server binds to and the client dials. */
+    private var connectHost: String = "127.0.0.1"
+
+    /** True when [connectHost] is a genuine site-local address. */
+    private var haveLanAddress = false
 
     /** Stands in for prefs: the service's provider re-reads these each request. */
     private var registry = CredentialRegistry.EMPTY
@@ -52,6 +77,9 @@ class WebDavAuthSchemeTest {
 
     @BeforeEach
     fun setUp() {
+        val lan = siteLocalIpv4()
+        haveLanAddress = lan != null
+        connectHost = lan ?: "127.0.0.1"
         root = Files.createTempDirectory("otg-authscheme").toFile()
         server = ServerBootstrap.start(
             port = PORT,
@@ -61,7 +89,7 @@ class WebDavAuthSchemeTest {
                 (if (p == null) emptyList() else listOf(p)) +
                     registry.acceptableCredentials(origin, System.currentTimeMillis())
             },
-            host = "127.0.0.1",
+            host = connectHost,
             authenticator = authenticator,
             lockManager = LockManager()
         )
@@ -76,7 +104,7 @@ class WebDavAuthSchemeTest {
     }
 
     private suspend fun request(method: String, path: String, auth: String? = null): HttpResponse =
-        client.request("http://127.0.0.1:$PORT$path") {
+        client.request("http://$connectHost:$PORT$path") {
             this.method = HttpMethod(method)
             if (auth != null) header("Authorization", auth)
         }
@@ -103,6 +131,7 @@ class WebDavAuthSchemeTest {
 
     @Test
     fun `the LAN passkey authenticates a local peer with no account`() = runBlocking {
+        assumeTrue(haveLanAddress, "no site-local address on this machine — nothing to prove")
         val key = CredentialRegistry.newLanPasskey()
         registry = CredentialRegistry.fromStored(CredentialRegistry.serialize(key), null)
 
@@ -114,7 +143,57 @@ class WebDavAuthSchemeTest {
     }
 
     @Test
+    fun `the LAN passkey is refused from loopback even with the right key`() = runBlocking {
+        // The mirror image of the test above, and the one that matters for the
+        // tunnel hole: a passkey-holding client arriving over loopback (where
+        // cloudflared/netbird/openp2p all land) must be rejected. This starts a
+        // second server on the loopback interface to make the origin explicit.
+        val loopback = ServerBootstrap.start(
+            port = PORT + 2,
+            storage = FileSystemDavStorage(root),
+            credentialProvider = { origin ->
+                registry.acceptableCredentials(origin, System.currentTimeMillis())
+            },
+            host = "127.0.0.1",
+            authenticator = authenticator,
+            lockManager = LockManager()
+        )
+        try {
+            val key = CredentialRegistry.newLanPasskey()
+            registry = CredentialRegistry.fromStored(CredentialRegistry.serialize(key), null)
+
+            suspend fun probe(path: String, auth: String?): HttpResponse =
+                client.request("http://127.0.0.1:${PORT + 2}$path") {
+                    method = HttpMethod("PROPFIND")
+                    if (auth != null) header("Authorization", auth)
+                }
+
+            val challengeResponse = probe("/", "Digest username=\"${key.username}\"")
+            assertEquals(HttpStatusCode.Unauthorized, challengeResponse.status)
+            val challenge = DigestAuthenticator.parseChallenge(challengeResponse.headers["WWW-Authenticate"]!!)!!
+            val cnonce = "cafe0002"
+            val response = authenticator.computeResponse(
+                username = key.username, password = key.password, method = "PROPFIND", uri = "/",
+                nonce = challenge.nonce, nc = "00000001", cnonce = cnonce, qop = "auth"
+            )
+            val answered = probe(
+                "/",
+                "Digest username=\"${key.username}\", realm=\"${challenge.realm}\", " +
+                    "nonce=\"${challenge.nonce}\", uri=\"/\", response=\"$response\", qop=auth, " +
+                    "nc=00000001, cnonce=\"$cnonce\", opaque=\"${challenge.opaque}\""
+            )
+            assertEquals(
+                HttpStatusCode.Unauthorized, answered.status,
+                "a loopback peer must never be treated as same-Wi-Fi"
+            )
+        } finally {
+            runCatching { loopback.close() }
+        }
+    }
+
+    @Test
     fun `primary account and passkey coexist`() = runBlocking {
+        assumeTrue(haveLanAddress, "no site-local address on this machine — nothing to prove")
         val key = CredentialRegistry.newLanPasskey()
         registry = CredentialRegistry.fromStored(CredentialRegistry.serialize(key), null)
 
