@@ -917,6 +917,71 @@ class WebDavEndToEndTest {
     }
 
     @Test
+    fun `a range request answers 206 with the sliced body`() = runBlocking {
+        // RFC 9110 §14.3: `Accept-Ranges: bytes` is an advertisement of a
+        // capability, and this server used to send it while ignoring `Range`
+        // entirely — a resuming client or a seeking mount layer got the whole
+        // file back with 200 and no way to know a partial read was possible.
+        // The advertisement is now backed by behaviour.
+        authorizedRequest("PUT", "/ranged.txt") { setBody("abcdefghij") }
+
+        val response = authorizedRequest("GET", "/ranged.txt") { header("Range", "bytes=2-5") }
+        assertEquals(HttpStatusCode.PartialContent, response.status)
+        assertEquals("cdef", response.bodyAsText())
+        assertEquals("bytes 2-5/10", response.headers["Content-Range"])
+        // §14.4.1: a 206 carries the same ETag/Last-Modified as the 200 would,
+        // so a client can still validate its cache against the whole resource.
+        assertEquals(
+            authorizedRequest("GET", "/ranged.txt").headers["ETag"],
+            response.headers["ETag"]
+        )
+    }
+
+    @Test
+    fun `an open ended and a suffix range both clamp to the file`() = runBlocking {
+        authorizedRequest("PUT", "/clamp.txt") { setBody("abcdefghij") }
+        val tail = authorizedRequest("GET", "/clamp.txt") { header("Range", "bytes=8-") }
+        assertEquals(HttpStatusCode.PartialContent, tail.status)
+        assertEquals("ij", tail.bodyAsText())
+        assertEquals("bytes 8-9/10", tail.headers["Content-Range"])
+
+        val suffix = authorizedRequest("GET", "/clamp.txt") { header("Range", "bytes=-3") }
+        assertEquals("hij", suffix.bodyAsText())
+    }
+
+    @Test
+    fun `a range past the end is 416 with the real length`() = runBlocking {
+        // §14.4.1.3: 416 plus `Content-Range: bytes */length`. A client
+        // resuming an interrupted download reads this as "the file changed
+        // underneath me" — answering with a silent 200 would corrupt its copy.
+        authorizedRequest("PUT", "/short.txt") { setBody("abc") }
+        val response = authorizedRequest("GET", "/short.txt") { header("Range", "bytes=99-120") }
+        assertEquals(HttpStatusCode.RequestedRangeNotSatisfiable, response.status)
+        assertEquals("bytes */3", response.headers["Content-Range"])
+    }
+
+    @Test
+    fun `an unknown range unit is ignored with a full 200`() = runBlocking {
+        // §14.2: "A server that does not understand or is unable to comply
+        // with ... MUST ignore it" — the response is the normal full body.
+        authorizedRequest("PUT", "/unit.txt") { setBody("hello") }
+        val response = authorizedRequest("GET", "/unit.txt") { header("Range", "seconds=1-2") }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("hello", response.bodyAsText())
+    }
+
+    @Test
+    fun `head ignores range and reports the full length`() = runBlocking {
+        // This branch is reached only by GET: HEAD returns earlier, and §14.2
+        // lets a server ignore a range on any method other than GET. The probe
+        // a sync client runs wants the full size, and that is what it gets.
+        authorizedRequest("PUT", "/headrange.bin") { setBody("0123456789") }
+        val head = authorizedRequest("HEAD", "/headrange.bin") { header("Range", "bytes=0-3") }
+        assertEquals(HttpStatusCode.OK, head.status)
+        assertEquals("10", head.headers["Content-Length"])
+    }
+
+    @Test
     fun `propfind reports the entity tag that get reports`() = runBlocking {
         // RFC 4918 §15.6: "The getetag property MUST be defined on any
         // DAV-compliant resource that returns the Etag header." This server

@@ -2,6 +2,7 @@ package com.jingjiangze.otgdrivebridge.server
 
 import com.jingjiangze.otgdrivebridge.security.CredentialGenerator
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
+import com.jingjiangze.otgdrivebridge.webdav.ByteRange
 import com.jingjiangze.otgdrivebridge.webdav.ChangeLog
 import com.jingjiangze.otgdrivebridge.webdav.DavNode
 import com.jingjiangze.otgdrivebridge.webdav.DavPropertyStore
@@ -10,6 +11,7 @@ import com.jingjiangze.otgdrivebridge.webdav.LockManager
 import com.jingjiangze.otgdrivebridge.webdav.PropfindParser
 import com.jingjiangze.otgdrivebridge.webdav.ProppatchParser
 import com.jingjiangze.otgdrivebridge.webdav.PropfindRequest
+import com.jingjiangze.otgdrivebridge.webdav.RangeOutcome
 import com.jingjiangze.otgdrivebridge.webdav.SyncCollectionParser
 import com.jingjiangze.otgdrivebridge.webdav.WebDavPaths
 import com.jingjiangze.otgdrivebridge.webdav.WebDavXml
@@ -185,11 +187,75 @@ class WebDavRequestHandler(
         call.response.header("ETag", etagOf(node))
         call.response.header("Last-Modified", WebDavXml.httpDate(node.lastModified))
         call.response.header("Accept-Ranges", "bytes")
-        call.respondBytes(
-            contentType = io.ktor.http.ContentType.parse(mime),
-            status = HttpStatusCode.OK,
-            provider = { readAll(stream) }
-        )
+
+        // RFC 9110 §14.3: `Accept-Ranges` is an advertisement of a capability,
+        // and this handler used to advertise `bytes` while `handleGet` ignored
+        // the `Range` request header entirely (measured: a `Range: bytes=0-9`
+        // got the whole file back with 200). Every downstream plan for this
+        // bridge needs partial reads — rclone-style parallel download, a
+        // resume after a dropped connection, and whatever mount layer Stage 4
+        // finally picks (MRxDAV and WinFSP both issue range requests when an
+        // application seeks) — so the advertisement became the contract and
+        // this is where it is honoured.
+        //
+        // The `Range` header is only consulted on GET: this branch is reached
+        // only by GET because HEAD returns above, and §14.2 lets a server
+        // "ignore or reject a Range header field in a request method other
+        // than GET" — a sync client's HEAD probe wants the full length, not a
+        // slice, and that is what it gets.
+        val range = when (val outcome = ByteRange.parse(call.request.headers["Range"], node.length)) {
+            // A range wider than the JVM's array ceiling cannot be served in
+            // one body: honouring it would OOM the process. §14.2 permits
+            // ignoring a range that cannot be satisfied as written; the client
+            // gets the whole file (200) with the real ETag and asks again for
+            // a slice it can fit — callers here stream in chunks no larger
+            // than a few MiB, so this is a guard rail, not a path.
+            is RangeOutcome.Spec ->
+                if (outcome.to - outcome.from >= Int.MAX_VALUE) RangeOutcome.Ignore else outcome
+            else -> outcome
+        }
+        when (range) {
+            is RangeOutcome.Spec -> {
+                // [ByteRange.parse] guarantees `to` < node.length, and the
+                // stream length equals node.length, so a short read below the
+                // requested end is the one case `Content-Range` must not claim
+                // it: report what was actually delivered.
+                val slice = readRange(stream, range.from, range.to)
+                if (slice.isEmpty()) {
+                    // The resource shrank between the metadata and this open,
+                    // so the slice has no bytes at all. §14.4.1.3's 416 is the
+                    // honest answer: `bytes 40-39` would be an arithmetically
+                    // invalid range header.
+                    call.response.header("Content-Range", "bytes */${node.length}")
+                    respondText(call, "", HttpStatusCode.RequestedRangeNotSatisfiable)
+                    return true
+                }
+                val last = range.from + slice.size - 1
+                state.status = HttpStatusCode.PartialContent.value
+                call.response.header("Content-Range", "bytes $range.from-$last/${node.length}")
+                call.respondBytes(slice, ContentType.parse(mime), HttpStatusCode.PartialContent)
+            }
+
+            RangeOutcome.Unsatisfiable -> {
+                stream.close()
+                // RFC 9110 §14.4.1.3: a well-formed range past the end is 416
+                // with the resource's real length — a resuming client reads
+                // that as "the file changed underneath me, start over".
+                call.response.header("Content-Range", "bytes */${node.length}")
+                respondText(call, "", HttpStatusCode.RequestedRangeNotSatisfiable)
+                return true
+            }
+
+            RangeOutcome.Ignore -> call.respondBytes(
+                contentType = ContentType.parse(mime),
+                status = HttpStatusCode.OK,
+                provider = { readAll(stream) }
+            )
+        }
+        // `respondBytes` is a raw Ktor call that produces no log line, so the
+        // 206 and full-200 outcomes report theirs here; the 416 paths already
+        // logged through `respondText` and returned early.
+        onCompleted?.invoke(state.method, state.path, state.username, state.status)
         return true
     }
 
@@ -1261,4 +1327,35 @@ class WebDavRequestHandler(
     }
 
     private fun readAll(stream: java.io.InputStream): ByteArray = stream.use { it.readBytes() }
+
+    /**
+     * The inclusive byte interval `from..to` of [stream], or fewer bytes when
+     * the resource shrank while it was open.
+     *
+     * `InputStream.skip` is specified to return *at least* the count skipped
+     * short of the target once the end is reached — a SAF content-provider
+     * stream may stop short even mid-file — so skipping is a loop until the
+     * position is reached or the stream ends. The caller turns a short read
+     * into an honest `Content-Range` or a 416.
+     */
+    private fun readRange(stream: java.io.InputStream, from: Long, to: Long): ByteArray =
+        stream.use { input ->
+            var remainingSkip = from
+            while (remainingSkip > 0) {
+                val skipped = input.skip(remainingSkip)
+                if (skipped <= 0) return@use ByteArray(0)
+                remainingSkip -= skipped
+            }
+            // The caller guards `to - from < Int.MAX_VALUE` before getting
+            // here, so the +1 fits an Int without an exactness check.
+            val length = (to - from + 1).toInt()
+            val buffer = ByteArray(length)
+            var filled = 0
+            while (filled < length) {
+                val read = input.read(buffer, filled, length - filled)
+                if (read < 0) break
+                filled += read
+            }
+            if (filled == length) buffer else buffer.copyOf(filled)
+        }
 }
