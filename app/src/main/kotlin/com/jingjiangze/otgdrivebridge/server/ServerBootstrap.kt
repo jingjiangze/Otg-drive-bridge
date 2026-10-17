@@ -46,7 +46,7 @@ object ServerBootstrap {
     fun start(
         port: Int,
         storage: DavStorage,
-        credentialProvider: () -> DigestAuthenticator.Credentials?,
+        credentialProvider: (origin: String) -> List<DigestAuthenticator.Credentials>,
         host: String = "0.0.0.0",
         authenticator: DigestAuthenticator = DigestAuthenticator(),
         lockManager: LockManager = LockManager(),

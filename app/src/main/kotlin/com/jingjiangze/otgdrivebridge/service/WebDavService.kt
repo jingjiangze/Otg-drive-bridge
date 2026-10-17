@@ -82,11 +82,19 @@ class WebDavService : android.app.Service() {
             }
         }
 
-        val credentials = StorageRootRepository.credentials()
+        // Origin-aware, read-fresh credential set. The engine's provider is
+        // invoked per request, so rotating the account password, toggling the
+        // LAN passkey or issuing a temporary key takes effect immediately — the
+        // old code snapshotted `credentials()` once at start and the running
+        // service kept authenticating the stale pair until it was restarted.
         val engine = WebDavEngine(
             storageProvider = storageProvider,
-            credentialProvider = {
-                credentials?.let { (user, pass) -> DigestAuthenticator.Credentials(user, pass) }
+            credentialProvider = { origin ->
+                val registry = StorageRootRepository.registry()
+                val primary = StorageRootRepository.credentials()
+                    ?.let { (user, pass) -> DigestAuthenticator.Credentials(user, pass) }
+                val base = if (primary == null) emptyList() else listOf(primary)
+                base + registry.acceptableCredentials(origin, System.currentTimeMillis())
             }
         )
         this.engine = engine

@@ -1,6 +1,5 @@
 package com.jingjiangze.otgdrivebridge.server
 
-import com.jingjiangze.otgdrivebridge.security.CredentialGenerator
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
 import com.jingjiangze.otgdrivebridge.webdav.ByteRange
 import com.jingjiangze.otgdrivebridge.webdav.ChangeLog
@@ -78,9 +77,20 @@ class WebDavRequestHandler(
         }
 
         val header = call.request.headers["Authorization"]
-        val parsed = DigestAuthenticator.parseHeader(header)
-        if (parsed == null || !verifyAuth(call, parsed)) {
+        // The early return on a missing/foreign scheme is what keeps `parsed`
+        // smart-castable below, and it shares the same plain 401 path as a
+        // wrong password — no header at all is a rejection, never a staleness.
+        val parsed = DigestAuthenticator.parseHeader(header) ?: run {
             respondChallenge(call)
+            return true
+        }
+        val outcome = verifyAuth(call, parsed)
+        if (outcome != DigestAuthenticator.Outcome.Authorized) {
+            // A stale nonce gets `stale=true`, which tells a conforming client
+            // to re-answer with the *same* credentials — otherwise the redirector
+            // surfaces a password prompt every NONCE_LIFETIME_SECONDS and the
+            // session looks "dead but reachable".
+            respondChallenge(call, stale = outcome == DigestAuthenticator.Outcome.Stale)
             return true
         }
         state.username = parsed.username
@@ -1144,20 +1154,52 @@ class WebDavRequestHandler(
 
     // ---------------------------------------------------------------- helpers
 
-    private fun verifyAuth(call: ApplicationCall, header: DigestAuthenticator.DigestHeader): Boolean {
-        val expected = currentCredentials() ?: return false
-        return authenticator.verify(header, expected, call.request.httpMethod.value.uppercase())
+    /**
+     * Origin-aware authentication.
+     *
+     * The peer's address is decided by [credentialProvider], which the engine
+     * wires to a [com.jingjiangze.otgdrivebridge.security.CredentialRegistry]:
+     * a site-local origin may present the LAN passkey (no account, key only),
+     * a remote origin may only use the primary account or live temporary keys.
+     * The provider gets the raw origin so the *trust decision* lives in one
+     * pure place, not in this handler.
+     */
+    private fun verifyAuth(call: ApplicationCall, header: DigestAuthenticator.DigestHeader): DigestAuthenticator.Outcome {
+        val origin = clientOrigin(call)
+        val candidates = credentialProvider?.invoke(origin) ?: return DigestAuthenticator.Outcome.Rejected
+        return authenticator.verifyOutcome(header, candidates, call.request.httpMethod.value.uppercase())
     }
 
-    /** Overridden by the engine so credentials can be rotated at runtime. */
-    var credentialProvider: (() -> DigestAuthenticator.Credentials?)? = null
+    /**
+     * The address the LAN trust decision is made against.
+     *
+     * The TCP peer alone is *not* that address: cloudflared and `netbird expose`
+     * run on the phone itself and proxy to `127.0.0.1:8080`, so every Internet
+     * request through a tunnel arrives with a loopback peer. Trusting it would
+     * hand the LAN passkey to anyone who can reach the public URL. Any proxy
+     * marker header (which a direct LAN client never sends, and both tunnel
+     * CLIs set on the HTTP path) reclassifies the request as remote — with the
+     * literal "proxied", which [com.jingjiangze.otgdrivebridge.security.IpTrust]
+     * classifies as non-local by construction, so a spoofed marker header can
+     * only *downgrade* trust, never open the LAN path.
+     */
+    private fun clientOrigin(call: ApplicationCall): String {
+        val h = call.request.headers
+        if (h["CF-Connecting-IP"] != null || h["X-Forwarded-For"] != null || h["X-Real-IP"] != null) {
+            return "proxied"
+        }
+        return call.request.local.remoteHost
+    }
 
-    private fun currentCredentials(): DigestAuthenticator.Credentials? =
-        credentialProvider?.invoke()
+    /**
+     * Overridden by the engine. Given the peer's address, returns the set of
+     * credentials it may present right now — empty means "no path from here".
+     */
+    var credentialProvider: ((origin: String) -> List<DigestAuthenticator.Credentials>)? = null
 
-    private suspend fun respondChallenge(call: ApplicationCall) {
+    private suspend fun respondChallenge(call: ApplicationCall, stale: Boolean = false) {
         state.status = 401
-        call.response.header("WWW-Authenticate", authenticator.challenge())
+        call.response.header("WWW-Authenticate", authenticator.challenge(stale))
         respondText(call, "401 Unauthorized", io.ktor.http.ContentType.Text.Plain, HttpStatusCode.Unauthorized)
     }
 

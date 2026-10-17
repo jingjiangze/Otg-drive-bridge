@@ -54,7 +54,7 @@ class WebDavEndToEndTest {
         server = ServerBootstrap.start(
             port = PORT,
             storage = FileSystemDavStorage(root),
-            credentialProvider = { DigestAuthenticator.Credentials(USERNAME, PASSWORD) },
+            credentialProvider = { _ -> listOf(DigestAuthenticator.Credentials(USERNAME, PASSWORD)) },
             host = "127.0.0.1",
             authenticator = authenticator,
             lockManager = LockManager()

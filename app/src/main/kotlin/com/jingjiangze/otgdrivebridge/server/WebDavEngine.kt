@@ -30,7 +30,13 @@ data class ServerState(
  */
 class WebDavEngine(
     private val storageProvider: () -> DavStorage?,
-    private val credentialProvider: () -> DigestAuthenticator.Credentials?,
+    /**
+     * Given a peer address, the credentials it may present now — the primary
+     * account plus any LAN passkey (local origins only) and live temporary keys.
+     * Re-read per request so rotating a key takes effect without restarting the
+     * service (the foreground service used to snapshot credentials at start).
+     */
+    private val credentialProvider: (origin: String) -> List<DigestAuthenticator.Credentials>,
     private val realm: String = DigestAuthenticator.DEFAULT_REALM
 ) {
 

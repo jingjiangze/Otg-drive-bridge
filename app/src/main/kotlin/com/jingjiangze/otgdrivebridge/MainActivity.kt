@@ -83,6 +83,14 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(StorageRootRepository.credentials() ?: generateAndStoreCredentials())
         }
         var internetEnabled by remember { mutableStateOf(false) }
+        // LAN passkey + temporary keys, refreshed from the registry so a restart
+        // of the screen does not lose them (they live in prefs, not in memory).
+        var lanKey by remember {
+            mutableStateOf(StorageRootRepository.registry().lanPasskey)
+        }
+        var tempKeys by remember {
+            mutableStateOf(StorageRootRepository.registry().aliveTemporaries(System.currentTimeMillis()))
+        }
         var transports by remember { mutableStateOf(emptyList<com.jingjiangze.otgdrivebridge.network.Transport>()) }
         var status by remember { mutableStateOf("未启动") }
         val isRunning by WebDavService.isRunning.collectAsState()
@@ -163,8 +171,77 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = {
                         credentials = generateAndStoreCredentials()
-                        status = "已轮换凭据，请重新连接"
+                        status = "已轮换凭据，运行中的服务立即生效（每请求重读）"
                     }) { Text("轮换密码") }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("局域网仅密钥（免账户）", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "同一局域网内的设备不验证账户，只用这把口令即可映射。口令由本机生成、可轮换；" +
+                            "公网/异地来源永远不认这把口令（按来源 IP 判定，不做任何 DNS 反查）。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            val key = StorageRootRepository.rotateLanPasskey()
+                            lanKey = key
+                            status = "已生成局域网密钥：${key.password}"
+                        }) { Text("生成/轮换局域网密钥") }
+                        OutlinedButton(onClick = {
+                            StorageRootRepository.saveLanPasskey(null)
+                            lanKey = null
+                            status = "局域网密钥已吊销"
+                        }) { Text("吊销") }
+                    }
+                    lanKey?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text("用户名：${it.username}", fontFamily = FontFamily.Monospace)
+                        Text("密钥：${it.password}", fontFamily = FontFamily.Monospace)
+                        Text(
+                            "Windows 侧直接映射 http://<本机IP>:8080/ 时输入这对即可，无需主账户。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("临时密钥（远程/借用，到期自动失效）", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "给远程设备（P2P 借用方）的一次性限时凭据。到点自动作废，不碰主账户。" +
+                            "任何来源都可使用（与局域网密钥相反），所以时限是它的护栏。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            val issued = StorageRootRepository.registry()
+                            val entry = com.jingjiangze.otgdrivebridge.security.CredentialRegistry.newTemporary(
+                                ttlMillis = 2L * 60 * 60 * 1000
+                            )
+                            StorageRootRepository.saveTemporaryKeys(issued.aliveTemporaries(System.currentTimeMillis()) + entry)
+                            tempKeys = StorageRootRepository.registry().aliveTemporaries(System.currentTimeMillis())
+                            status = "已签发 ${entry.username}（2 小时有效）：${entry.password}"
+                        }) { Text("签发 2 小时密钥") }
+                    }
+                    if (tempKeys.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        tempKeys.forEach { key ->
+                            Text(
+                                "${key.username} / ${key.password} — 剩余 " +
+                                    "${((key.expiresAtMillis ?: 0L) - System.currentTimeMillis()) / 60000} 分钟",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                 }
             }
 

@@ -15,14 +15,29 @@ import java.util.concurrent.ConcurrentHashMap
  *  - Digest never transmits the password; only HA1/HA2/response hashes.
  *  - RFC 2617 defines a fixed realm format, which the redirector accepts.
  *
- * Nonce freshness: a nonce issued here is stamped with the wall-clock second at
- * issue time. A nonce older than [NONCE_LIFETIME_SECONDS] triggers a
- * "stale=true" challenge so the client retries transparently.
+ * Nonce freshness: a nonce issued here is stamped with the time at issue and
+ * first use. A nonce older than [nonceLifetimeMillis] — or one that has served
+ * [maxNonceCount] requests — yields [Outcome.Stale], and the handler answers
+ * with `stale=true` so conforming clients (Windows' redirector, the Go client,
+ * litmus) retry transparently with the *same* credentials against the fresh
+ * nonce instead of prompting the user.
+ *
+ * A fabricated or already-pruned nonce stays [Outcome.Rejected] — claiming
+ * "stale" there would tell an attacker their credentials were otherwise valid.
  *
  * Thread safety: [NonceTracker] and [attempts] are concurrent; [MessageDigest]
  * instances are created per call.
  */
-class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
+class DigestAuthenticator(
+    private val realm: String = DEFAULT_REALM,
+    /** Injected so tests can expire a nonce without sleeping the lifetime. */
+    private val nonceLifetimeMillis: Long = NONCE_LIFETIME_SECONDS * 1000L,
+    /** Max requests one nonce may serve before rotation (was dead code, now enforced). */
+    private val maxNonceCount: Long = DEFAULT_MAX_NONCE_COUNT
+) {
+
+    /** Why a request did not pass — decides between `stale=true` and a hard 401. */
+    enum class Outcome { Authorized, Stale, Rejected }
 
     /** Credentials the server validates incoming `Authorization` headers against. */
     data class Credentials(val username: String, val password: String)
@@ -59,13 +74,12 @@ class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
         @Volatile var opaque: String = ""
         /** Highest nonce-count accepted so far (guards against replay). */
         val maxNcSeen = java.util.concurrent.atomic.AtomicLong(0L)
+        /** Requests served with this nonce — one nonce is rotated after [maxNonceCount]. */
+        val servedCount = java.util.concurrent.atomic.AtomicLong(0L)
     }
 
     private val trackers = ConcurrentHashMap<String, NonceTracker>()
     private val random = SecureRandom()
-
-    /** Max requests replayed with one nonce before it is rotated. */
-    private val maxNonceCount = 200
 
     /** How many distinct nonces we keep alive (bounded to avoid unbounded growth). */
     private val maxTrackedNonces = 512
@@ -88,41 +102,68 @@ class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
     }
 
     /**
-     * Verifies an incoming `Authorization: Digest` header against [expected].
+     * Verifies an incoming `Authorization: Digest` header against a single
+     * [expected] account, returning just the accept/reject bit.
      *
-     * @return true when the response hash matches and the request is fresh.
+     * Kept for the boolean callers (and the existing unit tests). The server's
+     * real path needs [verifyOutcome]: several credentials that share a realm
+     * (the primary account, a LAN passkey, live temporary keys) and the
+     * stale/rejected distinction that drives `stale=true`.
      */
-    fun verify(header: DigestHeader, expected: Credentials, method: String): Boolean {
-        if (!header.realm.equals(realm, ignoreCase = true)) return false
-        if (header.username != expected.username) return false
-        if (header.response.isBlank()) return false
+    fun verify(header: DigestHeader, expected: Credentials, method: String): Boolean =
+        verifyOutcome(header, listOf(expected), method) == Outcome.Authorized
 
-        val tracker = trackers[header.nonce] ?: return false
-        if (System.currentTimeMillis() - tracker.lastSeenMillis > NONCE_LIFETIME_MILLIS) return false
+    /**
+     * Verifies a header against [candidates] — any one matching username and
+     * response accepts the request.
+     *
+     * [Outcome.Stale] means the nonce aged out or hit [maxNonceCount] *before*
+     * any credential was compared, so the caller should re-challenge with
+     * `stale=true` and let the client retry the same credentials transparently.
+     * [Outcome.Rejected] covers a fabricated nonce, a replayed count, an
+     * opaque mismatch and a wrong password — all indistinguishable to the
+     * client, none of which may leak "your password was otherwise right".
+     */
+    fun verifyOutcome(header: DigestHeader, candidates: List<Credentials>, method: String): Outcome {
+        if (candidates.isEmpty()) return Outcome.Rejected
+        if (!header.realm.equals(realm, ignoreCase = true)) return Outcome.Rejected
+        if (header.response.isBlank()) return Outcome.Rejected
+
+        val tracker = trackers[header.nonce] ?: return Outcome.Rejected
+        val now = System.currentTimeMillis()
+        // Nonce lifecycle is credential-independent: check it before spending a
+        // hash, so an aged nonce yields `stale=true` regardless of the password.
+        if (now - tracker.lastSeenMillis > nonceLifetimeMillis) return Outcome.Stale
+        if (tracker.servedCount.get() >= maxNonceCount) return Outcome.Stale
 
         // RFC 2616: qop must be echoed; the nonce-count must not be replayed.
         val qop = header.qop?.lowercase()
-        if (qop != null && qop != "auth") return false
+        if (qop != null && qop != "auth") return Outcome.Rejected
         if (qop == "auth") {
-            if (header.nc.isNullOrBlank() || header.cnonce.isNullOrBlank()) return false
-            if (!isNcIncreasing(tracker, header.nc)) return false
+            if (header.nc.isNullOrBlank() || header.cnonce.isNullOrBlank()) return Outcome.Rejected
+            if (!isNcIncreasing(tracker, header.nc)) return Outcome.Rejected
         }
-        if (!header.opaque.isNullOrBlank() && header.opaque != tracker.opaque) return false
+        if (!header.opaque.isNullOrBlank() && header.opaque != tracker.opaque) return Outcome.Rejected
 
-        val expectedResponse = computeResponse(
-            username = expected.username,
-            password = expected.password,
-            method = method,
-            uri = header.uri,
-            nonce = header.nonce,
-            nc = header.nc ?: "00000001",
-            cnonce = header.cnonce ?: "",
-            qop = qop
-        )
-        if (!constantTimeEquals(expectedResponse, header.response)) return false
-
-        tracker.lastSeenMillis = System.currentTimeMillis()
-        return true
+        for (expected in candidates) {
+            if (header.username != expected.username) continue
+            val expectedResponse = computeResponse(
+                username = expected.username,
+                password = expected.password,
+                method = method,
+                uri = header.uri,
+                nonce = header.nonce,
+                nc = header.nc ?: "00000001",
+                cnonce = header.cnonce ?: "",
+                qop = qop
+            )
+            if (constantTimeEquals(expectedResponse, header.response)) {
+                tracker.lastSeenMillis = System.currentTimeMillis()
+                tracker.servedCount.incrementAndGet()
+                return Outcome.Authorized
+            }
+        }
+        return Outcome.Rejected
     }
 
     /** Rejects replayed nonce-counts for a given nonce. */
@@ -195,7 +236,9 @@ class DigestAuthenticator(private val realm: String = DEFAULT_REALM) {
 
         /** RFC 2617 nonce lifetime — after this the server replies `stale=true`. */
         const val NONCE_LIFETIME_SECONDS = 300L
-        private val NONCE_LIFETIME_MILLIS = NONCE_LIFETIME_SECONDS * 1000L
+
+        /** Requests one nonce may serve before it rotates (RFC 2617 §3.2.2 nonce count bound). */
+        const val DEFAULT_MAX_NONCE_COUNT = 200L
 
         private val HEX = "0123456789abcdef".toCharArray()
 
