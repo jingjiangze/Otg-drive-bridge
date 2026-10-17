@@ -159,22 +159,22 @@ func TestGetRangeOnMissingFileIsNotFound(t *testing.T) {
 
 func TestContentRangeParsing(t *testing.T) {
 	cases := []struct {
-		header       string
-		first, total int64
-		ok           bool
+		header                 string
+		first, complete, total int64
+		ok                     bool
 	}{
-		{"bytes 0-99/1000", 0, 1000, true},
-		{"bytes 5-9/10", 5, 10, true},
-		{"bytes 0-0/1", 0, 1, true},
+		{"bytes 0-99/1000", 0, 100, 1000, true},
+		{"bytes 5-9/10", 5, 5, 10, true},
+		{"bytes 0-0/1", 0, 1, 1, true},
 		// A total of 0 is impossible on the wire and would zero out the caller's
 		// progress arithmetic, so it is refused rather than returned.
-		{"bytes 0-0/0", 0, 0, false},
-		{"", 0, 0, false},
-		{"bytes */10", 0, 0, false},
-		{"bytes 9-0/10", 0, 0, false},
-		{"bytes 0-x/10", 0, 0, false},
-		{"bytes 0-10", 0, 0, false},
-		{"items 0-9/10", 0, 0, false},
+		{"bytes 0-0/0", 0, 0, 0, false},
+		{"", 0, 0, 0, false},
+		{"bytes */10", 0, 0, 0, false},
+		{"bytes 9-0/10", 0, 0, 0, false},
+		{"bytes 0-x/10", 0, 0, 0, false},
+		{"bytes 0-10", 0, 0, 0, false},
+		{"items 0-9/10", 0, 0, 0, false},
 	}
 	for _, c := range cases {
 		first, complete, total, ok := parseContentRange(c.header)
@@ -185,7 +185,19 @@ func TestContentRangeParsing(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if first != c.first || total != c.total || complete != total-first {
+		// The one invariant worth asserting beyond the parsed values: the
+		// complete byte count is the inclusive interval's width, and the whole
+		// interval lies inside the total. Anything else means the caller's
+		// progress arithmetic is being fed a slice that cannot exist.
+		if complete != c.complete || complete <= 0 {
+			t.Errorf("parseContentRange(%q) complete = %d, want %d (a positive interval width)",
+				c.header, complete, c.complete)
+		}
+		if first+complete > total {
+			t.Errorf("parseContentRange(%q) = bytes %d-%d/%d: the interval runs past the total",
+				c.header, first, first+complete-1, total)
+		}
+		if first != c.first || total != c.total {
 			t.Errorf("parseContentRange(%q) = %d+%d/%d, want first=%d total=%d",
 				c.header, first, complete, total, c.first, c.total)
 		}
@@ -379,7 +391,10 @@ func TestTraversalPathsNeverReachTheWire(t *testing.T) {
 
 func TestEncodedNamesStillPass(t *testing.T) {
 	f := newFakeServer(t)
-	f.putFile("/%E4%B8%AD%E6%96%87.txt", []byte("one"))
+	// The file is named 中文.txt. Stored under the decoded name, because that
+	// is what the real server serves on — see storedPath. The client is still
+	// handed the percent-encoded spelling, so this exercises the round trip.
+	f.putFile("/中文.txt", []byte("one"))
 
 	// A percent-encoded UTF-8 name is legal and must not be caught by the guard:
 	// the guard is about traversal, not about encoding.
@@ -388,7 +403,17 @@ func TestEncodedNamesStillPass(t *testing.T) {
 		t.Fatalf("Get with an encoded name: %v", err)
 	}
 	body.Close()
+	// The request on the wire kept the encoding — the guard decoded it to check
+	// for traversal, which is the only reason it is allowed to look at it.
 	if h := f.lastHeader("GET /%E4%B8%AD%E6%96%87.txt"); h == nil {
 		t.Error("the request was never sent")
 	}
+	// And the same file is reachable through the client's own encoder, so a
+	// caller that builds the path from a raw name is not talking to a file the
+	// fake cannot find.
+	other, _, _, err := f.client.Get(context.Background(), JoinSegments("中文.txt"))
+	if err != nil {
+		t.Fatalf("Get through JoinSegments: %v", err)
+	}
+	other.Close()
 }

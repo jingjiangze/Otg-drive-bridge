@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -257,8 +258,22 @@ func (f *fakeServer) verifyDigest(header, method string) bool {
 	return want == fields["response"]
 }
 
+// storedPath is the key a request's target is filed under.
+//
+// r.URL.Path is percent-DECODED, which is exactly what the real server serves
+// on: WebDavRequestHandler normalizes the decoded segments and looks the name
+// up in storage. So the fake must key by the decoded path too — a client that
+// asked for `/%E4%B8%AD%E6%96%87.txt` is asking for the file named 中文.txt,
+// and storing it under the escape would make it unfindable by any other
+// spelling of the same name. What went on the *wire* is still recorded under
+// EscapedPath in handle, so a test can assert on the request without the two
+// concerns getting confused.
+func storedPath(r *http.Request) string {
+	return r.URL.Path
+}
+
 func (f *fakeServer) handlePropfind(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
+	path := storedPath(r)
 	depth := r.Header.Get("Depth")
 	if depth == "" {
 		// WebDavRequestHandler defaults to "1"; "infinity" behaves the same.
@@ -417,7 +432,7 @@ func multistatusEntry(href string, length int, isDir bool) string {
 
 func (f *fakeServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	body, ok := f.files[r.URL.Path]
+	body, ok := f.files[storedPath(r)]
 	f.mu.Unlock()
 	if !ok {
 		http.Error(w, "404 Not Found", http.StatusNotFound)
@@ -498,7 +513,7 @@ func parseRangeHeader(value string) (from, to int64, ok bool) {
 // decide what "changed since" means rather than having to write to the fake and
 // infer it.
 func (f *fakeServer) handleReport(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if storedPath(r) != "/" {
 		http.Error(w, "403 sync-collection is only supported on the shared root",
 			http.StatusForbidden)
 		return
@@ -568,7 +583,7 @@ func (f *fakeServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	// Gap 8: the server ignores If-Match. Recording it so the test can assert
 	// the client *sent* it — the server-side gap is a Stage-3 item.
 	f.mu.Lock()
-	f.lastSeen["PUT "+r.URL.Path+" If-Match"] = r.Header.Clone()
+	f.lastSeen["PUT "+storedPath(r)+" If-Match"] = r.Header.Clone()
 	f.mu.Unlock()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -576,8 +591,8 @@ func (f *fakeServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	_, existed := f.files[r.URL.Path]
-	f.files[r.URL.Path] = body
+	_, existed := f.files[storedPath(r)]
+	f.files[storedPath(r)] = body
 	f.mu.Unlock()
 	w.Header().Set("ETag", `"1735689600000-`+fmt.Sprint(len(body))+`"`)
 	if existed {
@@ -590,23 +605,23 @@ func (f *fakeServer) handlePut(w http.ResponseWriter, r *http.Request) {
 func (f *fakeServer) handleMkcol(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.files[r.URL.Path]; ok {
+	if _, ok := f.files[storedPath(r)]; ok {
 		http.Error(w, "405 Already exists", http.StatusMethodNotAllowed)
 		return
 	}
-	f.files[r.URL.Path+"/"] = nil
+	f.files[storedPath(r)+"/"] = nil
 	w.WriteHeader(http.StatusCreated)
 }
 
 func (f *fakeServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.files[r.URL.Path]; !ok {
+	if _, ok := f.files[storedPath(r)]; !ok {
 		http.Error(w, "404 Not Found", http.StatusNotFound)
 		return
 	}
-	delete(f.files, r.URL.Path)
-	delete(f.files, r.URL.Path+"/")
+	delete(f.files, storedPath(r))
+	delete(f.files, storedPath(r)+"/")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -642,9 +657,16 @@ func (f *fakeServer) handleCopyOrMove(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(destPath, "/") {
 		destPath = "/" + destPath
 	}
+	// The Destination header carries an encoded path, the same encoding the
+	// request line does, so it decodes to the same key — otherwise a MOVE of
+	// 中文.txt would read the decoded source and write the encoded
+	// destination, leaving the file under a name no listing ever shows.
+	if decoded, err := url.PathUnescape(destPath); err == nil {
+		destPath = decoded
+	}
 
 	f.mu.Lock()
-	body, ok := f.files[r.URL.Path]
+	body, ok := f.files[storedPath(r)]
 	if !ok {
 		f.mu.Unlock()
 		http.Error(w, "404 Not Found", http.StatusNotFound)
@@ -663,7 +685,7 @@ func (f *fakeServer) handleCopyOrMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "MOVE" {
-		delete(f.files, r.URL.Path)
+		delete(f.files, storedPath(r))
 	}
 	f.files[destPath] = body
 	f.mu.Unlock()
@@ -695,7 +717,7 @@ func (f *fakeServer) handleUnlock(w http.ResponseWriter, r *http.Request) {
 // body ignored.
 func (f *fakeServer) handleProppatch(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	body, ok := f.files[r.URL.Path]
+	body, ok := f.files[storedPath(r)]
 	f.mu.Unlock()
 	if !ok {
 		http.Error(w, "404 Not Found", http.StatusNotFound)
@@ -704,7 +726,7 @@ func (f *fakeServer) handleProppatch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">`+
-		multistatusEntry(r.URL.Path, len(body), false)+`</D:multistatus>`)
+		multistatusEntry(storedPath(r), len(body), false)+`</D:multistatus>`)
 }
 
 // --- test helpers ----------------------------------------------------------
