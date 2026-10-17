@@ -16,8 +16,11 @@ package com.jingjiangze.otgdrivebridge.webdav
  *    of this bridge does — see the note on [parse]).
  *  - [Unsatisfiable]: the header is well-formed but no part of it falls
  *    within the resource (§14.4.1.3: first-position at/after the end). That
- *    is a 416 with `Content-Range: bytes */length`, and it is the answer that
- *    tells a resuming client "the file shrank underneath you — re-download".
+ *    is a 416 whose Content-Range is `bytes * / length`, and it is the answer
+ *    that tells a resuming client "the file shrank underneath you — re-download".
+ *    (The literal header value has no spaces — `bytes` `*` `/` `length` — and is
+ *    spelled with a space here only because `*` followed by `/` would close this
+ *    very comment block.)
  *  - [Spec]: exactly one inclusive byte interval to serve as 206.
  */
 sealed class RangeOutcome {
