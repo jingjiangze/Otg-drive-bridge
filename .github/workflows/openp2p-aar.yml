@@ -1,0 +1,94 @@
+name: openp2p AAR
+
+# Deliberately a separate workflow from ci.yml.
+#
+# This job downloads a third-party engine and cross-compiles it with a *pinned*
+# gomobile commit (the upstream README pins 7c491669… because newer gomobile
+# releases dropped Go 1.20 support). A network hiccup or an upstream toolchain
+# change must not turn the app's own gate red, so it is dispatch-only and its
+# artifact is consumed by hand for now.
+#
+# Usage: Actions → "openp2p AAR" → Run workflow, then download the artifact
+# `openp2p-aar` and drop `openp2p.aar` into app/libs/.
+#
+# Why the phone needs it: the phone is the *server* side of the openp2p tunnel
+# and only has to run the engine and log in; there is no CLI binary for
+# non-root Android, so the engine has to be an in-process AAR.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/openp2p-aar.yml'
+
+concurrency:
+  group: openp2p-aar
+  cancel-in-progress: true
+
+jobs:
+  build-aar:
+    name: Build openp2p AAR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Upstream pins Go 1.20: `go.mod` declares `go 1.20` and the README says
+      # "latest version not support go1.20" for gomobile.
+      - name: Set up Go 1.20
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
+      - name: Set up Android SDK
+        run: bash tools/ci-android-sdk.sh
+
+      # gomobile bind builds a JNI shim, so it needs an NDK even though the Go
+      # side is pure Go. NDK 21 is what the upstream README targets.
+      - name: Install NDK 21
+        run: |
+          SDKMANAGER=sdkmanager
+          if [ -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "ndk;21.4.7075529"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/21.4.7075529" >> "$GITHUB_ENV"
+
+      # The commit the upstream app/README.md pins. `@latest` is not usable:
+      # newer gomobile versions require a newer Go than the engine declares.
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@7c4916698cc93475ebfea76748ee0faba2deb2a5
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: gomobile init
+        run: gomobile init
+
+      - name: Fetch openp2p at the pinned release
+        run: |
+          git clone --depth 1 --branch v3.25.11 \
+            https://github.com/openp2p-cn/openp2p.git "$RUNNER_TEMP/openp2p"
+          git -C "$RUNNER_TEMP/openp2p" rev-parse HEAD
+
+      - name: Bind the AAR
+        working-directory: ${{ runner.temp }}/openp2p/core
+        run: |
+          gomobile bind -target=android -androidapi 21 \
+            -o "$GITHUB_WORKSPACE/openp2p.aar" .
+          ls -l "$GITHUB_WORKSPACE/openp2p.aar"
+
+      - name: Verify the AAR contains the API we call
+        run: |
+          # classes.jar is the part the Kotlin wrapper will link against; the
+          # check is cheap and fails the job at the right layer if the upstream
+          # package name ever changes.
+          unzip -l openp2p.aar
+          mkdir -p "$RUNNER_TEMP/aar" && unzip -o -q openp2p.aar classes.jar -d "$RUNNER_TEMP/aar"
+          unzip -l "$RUNNER_TEMP/aar/classes.jar" | grep -q 'Openp2p' \
+            || { echo "error: Openp2p class missing from the AAR"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openp2p-aar
+          path: openp2p.aar
+          if-no-files-found: error
