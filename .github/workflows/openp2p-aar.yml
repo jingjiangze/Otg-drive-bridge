@@ -56,13 +56,20 @@ jobs:
 
       # The commit the upstream app/README.md pins. `@latest` is not usable:
       # newer gomobile versions require a newer Go than the engine declares.
-      - name: Install gomobile
+      #
+      # `gomobile init` is deliberately NOT used. It runs
+      # `go install golang.org/x/mobile/cmd/gobind@latest` internally, and that
+      # latest now declares `go 1.26.0` — which Go 1.20 rejects with
+      # "invalid go version '1.26.0': must match format 1.23". Installing
+      # gobind from the same pinned commit next to gomobile is all init does
+      # that bind needs, and it keeps the pair consistent.
+      - name: Install gomobile and gobind (pinned commit)
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@7c4916698cc93475ebfea76748ee0faba2deb2a5
+          PIN=7c4916698cc93475ebfea76748ee0faba2deb2a5
+          go install "golang.org/x/mobile/cmd/gomobile@${PIN}"
+          go install "golang.org/x/mobile/cmd/gobind@${PIN}"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: gomobile init
-        run: gomobile init
+          "$(go env GOPATH)/bin/gomobile" version || true
 
       - name: Fetch openp2p at the pinned release
         run: |
