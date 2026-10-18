@@ -100,6 +100,13 @@ func (f *FS) OpenFile(name string, flag int, _ os.FileMode) (gofs.File, error) {
 			return fail(err)
 		}
 	}
+	// Rewind before handing the temp out: io.Copy left the cursor at EOF, so a
+	// reader would see zero bytes and a writer would append after the content
+	// instead of replacing it — the hydration bug the Windows CI caught first,
+	// invisible on Linux where the build tag hid this file.
+	if _, err := temp.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
 
 	// A brand-new resource must always commit on close, even for a
 	// read-flavoured open: without this, `O_CREATE|O_RDONLY` opened a file,
