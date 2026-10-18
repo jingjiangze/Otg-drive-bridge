@@ -51,7 +51,7 @@ func TestHrefMatchesClientEncoding(t *testing.T) {
 	// A literal "%" must arrive as one escape, not double-encoded: the server
 	// decodes exactly once.
 	if got := Href([]string{"100%.txt"}); got != "/100%25.txt" {
-		t.Errorf("Href with percent = %q, want /100%25.txt", got)
+		t.Errorf("Href with percent = %q, want /100%%25.txt", got)
 	}
 }
 
