@@ -58,17 +58,17 @@ func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	p := r.URL.Path
 	switch r.Method {
-	case http.MethodPropfind:
+	case "PROPFIND":
 		f.propfind(w, r, p)
 	case http.MethodGet:
 		f.get(w, p)
 	case http.MethodPut:
 		f.put(w, r, p)
-	case http.MethodMkcol:
+	case "MKCOL":
 		f.mkcol(w, p)
 	case http.MethodDelete:
 		f.del(w, p)
-	case http.MethodMove:
+	case "MOVE":
 		f.move(w, r, p)
 	default:
 		http.Error(w, "405", http.StatusMethodNotAllowed)
