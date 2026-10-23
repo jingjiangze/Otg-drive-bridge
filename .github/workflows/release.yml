@@ -130,7 +130,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "OTG Drive Bridge $GITHUB_REF_NAME" \
             --generate-notes \
-            dist/* ../SHA256SUMS.txt
+            dist/* SHA256SUMS.txt
 
       - name: Upload staged artifacts (untagged runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
