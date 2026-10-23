@@ -138,6 +138,32 @@ class WebDavEndToEndTest {
     }
 
     @Test
+    fun `format xml query parameter overrides an html accept`() = runBlocking {
+        val response = authorizedRequest("GET", "/?format=xml") {
+            header("Accept", "text/html,application/xhtml+xml")
+        }
+        assertEquals(HttpStatusCode.MultiStatus, response.status)
+        assertTrue(response.headers["Content-Type"]!!.startsWith("application/xml"))
+    }
+
+    @Test
+    fun `quote characters in names stay inert inside hrefs and onclick`() = runBlocking {
+        val hostile = WebDavPaths.percentEncode("q\"uote'.txt")
+        assertEquals(
+            HttpStatusCode.Created,
+            authorizedRequest("PUT", "/$hostile") { setBody("x") }.status
+        )
+        val body = authorizedRequest("GET", "/") {
+            header("Accept", "text/html")
+        }.bodyAsText()
+        // The name must render escaped in text and never leak a raw quote
+        // into the attribute or the onclick JS string.
+        assertTrue(body.contains("q&quot;uote&#39;.txt"))
+        assertFalse(body.contains("\"q\\\"uote"))
+        assertTrue(body.contains("del('"))
+    }
+
+    @Test
     fun `put creates a file and get reads it back`() = runBlocking {
         val put = authorizedRequest("PUT", "/hello.txt") { setBody("Hello OTG") }
         assertEquals(HttpStatusCode.Created, put.status)

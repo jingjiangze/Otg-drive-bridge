@@ -1337,9 +1337,15 @@ class WebDavRequestHandler(
     }
 
     private fun wantsHtmlListing(call: ApplicationCall): Boolean {
-        if (call.request.queryParameters["format"] == "html") return true
-        val accept = call.request.headers["Accept"] ?: return false
-        return accept.contains("text/html", ignoreCase = true)
+        // The explicit query parameter outranks Accept in both directions:
+        // `html` forces the page for linkability, `xml` is the escape hatch a
+        // WebDAV client could use if it ever did send `Accept: text/html` on
+        // a collection GET.
+        return when (call.request.queryParameters["format"]) {
+            "html" -> true
+            "xml" -> false
+            else -> call.request.headers["Accept"]?.contains("text/html", ignoreCase = true) == true
+        }
     }
 
     private suspend fun respondHtmlListing(call: ApplicationCall, segments: List<String>, node: DavNode): Boolean {
