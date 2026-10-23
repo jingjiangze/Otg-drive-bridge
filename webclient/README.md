@@ -16,6 +16,22 @@
   `app/src/main/kotlin/com/jingjiangze/otgdrivebridge/server/HtmlIndex.kt` 渲染）
   不受 CORS 限制，是日常使用的正路；本站是「任何浏览器、任何设备」的兜底入口与演示面。
 
+## 资源镜像链（2026-10-24 加装）
+
+国内访问 CF 边缘是主要慢因（资源总体 <26KB，体积已排除；实测见
+`_tmp/otg-web-mirror-2026-10-24/`）。`index.html` 内嵌加载链：
+
+```
+cdn.jsdelivr.net → testingcf.jsdelivr.net → gcore.jsdelivr.net → fastly.jsdelivr.net → 同源
+```
+
+- jsDelivr 只镜像**公开仓库**，URL 用 **commit SHA 固定**（`@<WEB_SHA>`），永久缓存、字节可复现；
+  jsDelivr 对 `.html` 返回 text/plain，所以 **HTML 入口只能留在本站**，镜像只承载 JS/CSS。
+- **升级步骤（固定两段提交）**：改 `app.js`/`style.css` → 先提交资源 → 再提交把 `index.html`
+  的 `WEB_SHA` 指到上一个提交的 SHA → 重跑本 README 的部署命令。顺序反了镜像会拿到旧资源。
+- jsDelivr 缓存地址自检：`https://cdn.jsdelivr.net/gh/jingjiangze/Otg-drive-bridge@<SHA>/webclient/app.js`
+  应返回 200 / `application/javascript` / 字节数与仓库一致。
+
 ## 部署（本工作区已验证配方，同公告后台/下载站）
 
 ```bash
