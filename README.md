@@ -28,6 +28,7 @@
   - **SAF 树授权**（`ACTION_OPEN_DOCUMENT_TREE` + `takePersistableUriPermission`）——最小权限路径，Android 11+ 也能用；
   - **`MANAGE_EXTERNAL_STORAGE`**（all-files access）——官方文档明确覆盖「OTG 盘与 SD 卡根目录」，可直接按路径操作。
 - **HTTP Digest 认证**（RFC 2617）——不用 Basic，因此不受 Windows `BasicAuthLevel` 限制、也不受 Office 365 弃用 Basic Auth 的影响。
+- **浏览器即客户端**——同一 URL 用浏览器打开就是文件管理页（列目录 / 下载 / 上传 / 删除 / 建目录，内嵌 JS 直说 PUT/DELETE/MKCOL，Digest 由浏览器原生 401 弹窗协商）；WebDAV 客户端拿到的 207 multistatus 原样保留（按 `Accept` 头协商，`?format=html` 强制 HTML）。
 - **原子写**——`AtomicWriteHandle` 契约：先写暂存区，`commit()` 时才发布。`FileSystemDavStorage` 用同分区 `.otgpart` + rename；`SafDavStorage` 受 SAF 限制（无 rename 动词），改为 App `cacheDir` 暂存后经 `openOutputStream("wt")` 拷入目标，**中断时目标是截断态**——这一点的真机行为列在手动验收清单里。
 - **RFC 4918 锁**——`opaquelocktoken:` + `If:` 头，LOCK/UNLOCK 冲突返回 423。
 - **路径穿越防护**——`..` / `.` / 反斜杠 / NUL / Windows 保留名在**解码后**判定，编码绕过（`%2e%2e`、`..%2f`）同样拦截。
@@ -87,6 +88,8 @@ CI（`.github/workflows/ci.yml`）三个 job：
 | `lint` | `:app:lintDebug` | lint HTML 报告 |
 | `build` | `:app:assembleDebug`（依赖 test + lint 通过） | debug APK + `SHA256SUMS.txt` |
 
+发布产物不走上面的 debug job：`.github/workflows/release.yml`（tag `v*` 触发，也可手动 dispatch 试跑）——签名 release APK（keystore 从 secrets 注入，不入库）+ Windows `otg-mount.exe`，连同 SHA256SUMS 一起挂到 GitHub Release。
+
 单元测试（6 个文件、10 个测试类）：
 
 - `WebDavPathsTest`（`webdav/WebDavPathsTest.kt`）— 路径穿越、`%2e%2e`、`..%2f`、反斜杠、NUL、Windows 保留名、UTF-8 往返、`+` 不解码成空格；
@@ -94,7 +97,7 @@ CI（`.github/workflows/ci.yml`）三个 job：
 - `FileSystemDavStorageTest`、`LockManagerTest`（同文件 `webdav/FileSystemDavStorageTest.kt`）— CRUD、**中断写不毁原文件**、关闭未提交即丢弃、`overwrite=false` 拒绝、move/copy/递归删除、锁与 423、`If:` token 放行、过期清理；
 - `WebDavXmlTest`（`webdav/WebDavXmlTest.kt`）— `D:` 命名空间、`iscollection`、仅文件有 `content-length`、集合 href 尾斜杠、XML 转义、`lockdiscovery`、Allow 头方法集完整；
 - `TransportProbeUseCaseTest`、`NetBirdExposureTest`、`PublicEndpointTest`（同文件 `network/TransportProbeUseCaseTest.kt`）— 局域网优先、离线空列表、未开启互联网不探测、排序 LAN < VIRTUAL_LAN < TUNNEL、工具缺失不产卡片、隧道卡片带 100 MB 提示、URL 解析；
-- `WebDavEndToEndTest`（`server/WebDavEndToEndTest.kt`）— **真起 Ktor 服务器**（`127.0.0.1:18080`）跑完整 Digest 握手：OPTIONS 免认证 + `DAV`/`Allow` 头、401 challenge、PROPFIND multistatus、PUT/GET 往返、PUT 覆盖 204、MKCOL、父目录缺失 409、穿越 400、MOVE/DELETE/COPY、LOCK→423→UNLOCK→PUT、`If:` token 放行、错口令 401、未知方法 405、HEAD Content-Length、UTF-8 文件名。
+- `WebDavEndToEndTest`（`server/WebDavEndToEndTest.kt`）— **真起 Ktor 服务器**（`127.0.0.1:18080`）跑完整 Digest 握手：OPTIONS 免认证 + `DAV`/`Allow` 头、401 challenge、PROPFIND multistatus、PUT/GET 往返、PUT 覆盖 204、MKCOL、父目录缺失 409、穿越 400、MOVE/DELETE/COPY、LOCK→423→UNLOCK→PUT、`If:` token 放行、错口令 401、未知方法 405、HEAD Content-Length、UTF-8 文件名、浏览器 HTML 列表（Accept 协商 / `?format=html` 强制 / `*/*` 仍回 207）。
 
 ## 手动验收清单（真机）
 
@@ -121,7 +124,7 @@ CI（`.github/workflows/ci.yml`）三个 job：
 - [ ] T5 三条通路探测 UI（已完成大部分，待真机）
 - [ ] T6 Windows 原生映射盘端到端
 - [ ] T7 互联网暴露安全基线（默认关、显式开启、可见告警）
-- [ ] T8 发布：签名 + Release
+- [x] T8 发布：签名 + Release（`.github/workflows/release.yml`，tag `v*` 触发）
 
 ## 异地接入（openp2p，可选）
 
