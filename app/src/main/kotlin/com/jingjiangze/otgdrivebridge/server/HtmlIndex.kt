@@ -12,7 +12,7 @@ import java.util.Locale
  * served from the very URL the DAV clients talk to.
  *
  * A browser navigation sends `Accept: text/html`; a WebDAV client never does
- * (rclone sends `*/*`, Windows MiniRedir nothing usable), so negotiating on
+ * (rclone accepts anything, Windows MiniRedir nothing usable), so negotiating on
  * that header is what lets one URL serve both worlds while the 207 multistatus
  * contract for mount clients stays untouched. `?format=html` is the explicit
  * override that makes the page linkable without relying on Accept.
