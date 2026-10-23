@@ -157,6 +157,37 @@ jobs:
           sha256sum "$APK" | tee app/build/outputs/apk/debug/SHA256SUMS.txt
           echo "APK=$APK" >> "$GITHUB_STEP_SUMMARY"
 
+  # -------------------------------------------------- release smoke (R8 path)
+  # assembleRelease without a keystore still runs the full R8 minify + resource
+  # shrink, which is a different compilation path from assembleDebug. The
+  # signing itself is left to release.yml — this job exists so a proguard/R8
+  # break fails CI on main instead of the release tag.
+  build-release:
+    name: Assemble release APK (unsigned, R8 smoke)
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inject openp2p AAR
+        uses: ./.github/actions/inject-openp2p-aar
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        run: bash tools/ci-android-sdk.sh
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Assemble
+        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: otg-drive-bridge-release-unsigned
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
   # ------------------------------------------------------------- go client tests
   # The Windows side of the bridge: the Digest client and the WebDAV client.
   # Both are pure Go with no cgo, so they run on a Linux runner.
