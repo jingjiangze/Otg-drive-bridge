@@ -3,6 +3,7 @@ package com.jingjiangze.otgdrivebridge.server
 import com.jingjiangze.otgdrivebridge.security.DigestAuthenticator
 import com.jingjiangze.otgdrivebridge.webdav.FileSystemDavStorage
 import com.jingjiangze.otgdrivebridge.webdav.LockManager
+import com.jingjiangze.otgdrivebridge.webdav.WebDavPaths
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.DefaultRequest
@@ -98,6 +99,42 @@ class WebDavEndToEndTest {
         assertTrue(body.contains("xmlns:D=\"DAV:\""))
         assertTrue(body.contains("<D:multistatus"))
         assertTrue(body.contains("<D:iscollection>1</D:iscollection>"))
+    }
+
+    @Test
+    fun `browser navigating with accept html gets the file manager page`() = runBlocking {
+        val weird = WebDavPaths.percentEncode("a&b<c>.txt")
+        assertEquals(
+            HttpStatusCode.Created,
+            authorizedRequest("PUT", "/$weird") { setBody("x") }.status
+        )
+        java.io.File(root, "docs").mkdirs()
+
+        val response = authorizedRequest("GET", "/") {
+            header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.headers["Content-Type"]!!.startsWith("text/html"))
+        val body = response.bodyAsText()
+        assertTrue(body.contains("<!DOCTYPE html>"))
+        // The file name is hostile on purpose: it must arrive HTML-escaped.
+        assertTrue(body.contains("a&amp;b&lt;c&gt;.txt"))
+        assertTrue(body.contains("href=\"/docs/\""))
+    }
+
+    @Test
+    fun `dav client without html accept still gets the multistatus listing`() = runBlocking {
+        val response = authorizedRequest("GET", "/") { header("Accept", "*/*") }
+        assertEquals(HttpStatusCode.MultiStatus, response.status)
+        assertTrue(response.headers["Content-Type"]!!.startsWith("application/xml"))
+    }
+
+    @Test
+    fun `format html query parameter forces the file manager page`() = runBlocking {
+        val response = authorizedRequest("GET", "/?format=html") { header("Accept", "*/*") }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.headers["Content-Type"]!!.startsWith("text/html"))
+        assertTrue(response.bodyAsText().contains("<!DOCTYPE html>"))
     }
 
     @Test

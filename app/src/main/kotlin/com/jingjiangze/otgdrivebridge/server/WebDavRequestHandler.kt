@@ -186,6 +186,15 @@ class WebDavRequestHandler(
         }
 
         if (node.isDirectory) {
+            // Content negotiation on one URL: a browser navigates with
+            // `Accept: text/html` and gets the HTML file manager (HtmlIndex);
+            // everything that speaks WebDAV — rclone sends `*/*`, Windows
+            // MiniRedir nothing usable — keeps the 207 multistatus contract
+            // below. `?format=html` is the explicit override that makes the
+            // page linkable without depending on Accept at all.
+            if (wantsHtmlListing(call)) {
+                return respondHtmlListing(call, segments, node)
+            }
             // Windows Explorer navigates directories; serve a minimal listing.
             return respondDirectoryIndex(call, segments, node)
         }
@@ -1324,6 +1333,27 @@ class WebDavRequestHandler(
         }
         call.respond(content)
         onCompleted?.invoke(state.method, state.path, state.username, state.status)
+        return true
+    }
+
+    private fun wantsHtmlListing(call: ApplicationCall): Boolean {
+        if (call.request.queryParameters["format"] == "html") return true
+        val accept = call.request.headers["Accept"] ?: return false
+        return accept.contains("text/html", ignoreCase = true)
+    }
+
+    private suspend fun respondHtmlListing(call: ApplicationCall, segments: List<String>, node: DavNode): Boolean {
+        val html = HtmlIndex.render(
+            segments = segments,
+            children = node.listChildren(),
+            mimeTypeOf = { storage.mimeTypeOf(it) }
+        )
+        respondText(
+            call,
+            html,
+            ContentType.Text.Html.withCharset(Charsets.UTF_8),
+            HttpStatusCode.OK
+        )
         return true
     }
 
