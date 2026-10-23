@@ -1351,7 +1351,7 @@ class WebDavRequestHandler(
         respondText(
             call,
             html,
-            ContentType.Text.Html.withCharset(Charsets.UTF_8),
+            io.ktor.http.ContentType.parse("text/html; charset=utf-8"),
             HttpStatusCode.OK
         )
         return true
