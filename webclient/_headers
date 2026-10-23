@@ -1,0 +1,19 @@
+# Security headers for every response. Cache-Control is deliberately NOT set
+# on /* — _headers merges same-name headers across matching rules with a comma,
+# and a stray no-store would win over the per-path public rules below
+# (measured on the superbig-gateway deployment).
+/*
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+
+# Pages 308s /index.html to /, so rules live on both the bare root and the
+# file name; only the bare root would leave the 308 itself cacheable.
+/
+  Cache-Control: public, max-age=120
+/index.html
+  Cache-Control: public, max-age=120
+/app.js
+  Cache-Control: public, max-age=300
+/style.css
+  Cache-Control: public, max-age=300

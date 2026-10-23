@@ -1,0 +1,57 @@
+:root {
+  color-scheme: light dark;
+  --line: rgba(128, 128, 128, 0.35);
+  --accent: #0a7d33;
+  --danger: #b3261e;
+  --muted: #888;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 3rem;
+  max-width: 880px;
+}
+header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: .5rem; }
+header h1 { margin: 0; font-size: 1.4rem; }
+header .sub { color: var(--muted); font-size: .9rem; margin-left: .5rem; }
+header nav a { margin-left: .9rem; text-decoration: none; }
+.banner {
+  margin: 1rem 0 0; padding: .5rem .8rem; border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid var(--accent);
+}
+.card {
+  margin-top: 1rem; padding: 1rem 1.1rem;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.card h2 { margin: 0 0 .6rem; font-size: 1.05rem; }
+.row { display: flex; gap: .5rem; margin-bottom: .5rem; flex-wrap: wrap; align-items: center; }
+.row.two input { flex: 1 1 10rem; }
+input[type=text], input[type=password] {
+  padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 6px;
+  font: inherit; min-width: 0;
+}
+#url { flex: 1 1 18rem; font-family: ui-monospace, monospace; }
+button {
+  padding: .45rem .9rem; border: 1px solid var(--line); border-radius: 6px;
+  background: none; font: inherit; cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.del { border: 0; color: var(--danger); padding: 0 .3rem; }
+.msg { color: var(--danger); min-height: 1.2em; }
+.hint { color: var(--muted); font-size: .85rem; margin: .6rem 0 0; }
+.hint code { font-family: ui-monospace, monospace; }
+.crumb { margin: 1.2rem 0 .4rem; }
+.crumb a, .crumb span { text-decoration: none; }
+.toolbar { display: flex; gap: .5rem; margin-bottom: .6rem; align-items: center; flex-wrap: wrap; }
+.path-label { color: var(--muted); font-family: ui-monospace, monospace; font-size: .85rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line); }
+th.num, td.num { text-align: right; white-space: nowrap; }
+a.name { text-decoration: none; }
+a.dir { font-weight: 600; }
+td.empty { color: var(--muted); text-align: center; padding: 2rem 0; }
+footer { margin-top: 2.5rem; color: var(--muted); font-size: .82rem; }
+.hidden { display: none; }
+@media (prefers-color-scheme: dark) { .msg, button.del { color: #ff8a80; } }

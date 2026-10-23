@@ -1,0 +1,463 @@
+/*
+ * OTG Drive Bridge — static WebDAV client.
+ *
+ * Talks RFC 4918 to the phone's Ktor server with HTTP Digest (RFC 2617)
+ * implemented client-side: browsers do not answer 401 challenges for fetch(),
+ * so the first probe captures the challenge and every later call signs itself.
+ * Demo mode swaps the transport for an in-memory filesystem so the instance
+ * site demonstrates browse/upload/mkdir/delete with no server at all.
+ */
+'use strict';
+
+/* ------------------------------------------------------------- md5 (RFC 1321) */
+
+function md5cycle(x, k) {
+  let a = x[0], b = x[1], c = x[2], d = x[3];
+  a = ff(a, b, c, d, k[0], 7, -680876936); d = ff(d, a, b, c, k[1], 12, -389564586);
+  c = ff(c, d, a, b, k[2], 17, 606105819); b = ff(b, c, d, a, k[3], 22, -1044525330);
+  a = ff(a, b, c, d, k[4], 7, -176418897); d = ff(d, a, b, c, k[5], 12, 1200080426);
+  c = ff(c, d, a, b, k[6], 17, -1473231341); b = ff(b, c, d, a, k[7], 22, -45705983);
+  a = ff(a, b, c, d, k[8], 7, 1770035416); d = ff(d, a, b, c, k[9], 12, -1958414417);
+  c = ff(c, d, a, b, k[10], 17, -42063); b = ff(b, c, d, a, k[11], 22, -1990404162);
+  a = ff(a, b, c, d, k[12], 7, 1804603682); d = ff(d, a, b, c, k[13], 12, -40341101);
+  c = ff(c, d, a, b, k[14], 17, -1502002290); b = ff(b, c, d, a, k[15], 22, 1236535329);
+  a = gg(a, b, c, d, k[1], 5, -165796510); d = gg(d, a, b, c, k[6], 9, -1069501632);
+  c = gg(c, d, a, b, k[11], 14, 643717713); b = gg(b, c, d, a, k[0], 20, -373897302);
+  a = gg(a, b, c, d, k[5], 5, -701558691); d = gg(d, a, b, c, k[10], 9, 38016083);
+  c = gg(c, d, a, b, k[15], 14, -660478335); b = gg(b, c, d, a, k[4], 20, -405537848);
+  a = gg(a, b, c, d, k[9], 5, 568446438); d = gg(d, a, b, c, k[14], 9, -1019803690);
+  c = gg(c, d, a, b, k[3], 14, -187363961); b = gg(b, c, d, a, k[8], 20, 1163531501);
+  a = gg(a, b, c, d, k[13], 5, -1444681467); d = gg(d, a, b, c, k[2], 9, -51403784);
+  c = gg(c, d, a, b, k[7], 14, 1735328473); b = gg(b, c, d, a, k[12], 20, -1926607734);
+  a = hh(a, b, c, d, k[5], 4, -378558); d = hh(d, a, b, c, k[8], 11, -2022574463);
+  c = hh(c, d, a, b, k[11], 16, 1839030562); b = hh(b, c, d, a, k[14], 23, -35309556);
+  a = hh(a, b, c, d, k[1], 4, -1530992060); d = hh(d, a, b, c, k[4], 11, 1272893353);
+  c = hh(c, d, a, b, k[7], 16, -155497632); b = hh(b, c, d, a, k[10], 23, -1094730640);
+  a = hh(a, b, c, d, k[13], 4, 681279174); d = hh(d, a, b, c, k[0], 11, -358537222);
+  c = hh(c, d, a, b, k[3], 16, -722521979); b = hh(b, c, d, a, k[6], 23, 76029189);
+  a = hh(a, b, c, d, k[9], 4, -640364487); d = hh(d, a, b, c, k[12], 11, -421815835);
+  c = hh(c, d, a, b, k[15], 16, 530742520); b = hh(b, c, d, a, k[2], 23, -995338651);
+  a = ii(a, b, c, d, k[0], 6, -198630844); d = ii(d, a, b, c, k[7], 10, 1126891415);
+  c = ii(c, d, a, b, k[14], 15, -1416354905); b = ii(b, c, d, a, k[5], 21, -57434055);
+  a = ii(a, b, c, d, k[12], 6, 1700485571); d = ii(d, a, b, c, k[3], 10, -1894986606);
+  c = ii(c, d, a, b, k[10], 15, -1051523); b = ii(b, c, d, a, k[1], 21, -2054922799);
+  a = ii(a, b, c, d, k[8], 6, 1873313359); d = ii(d, a, b, c, k[15], 10, -30611744);
+  c = ii(c, d, a, b, k[6], 15, -1560198380); b = ii(b, c, d, a, k[13], 21, 1309151649);
+  a = ii(a, b, c, d, k[4], 6, -145523070); d = ii(d, a, b, c, k[11], 10, -1120210379);
+  c = ii(c, d, a, b, k[2], 15, 718787259); b = ii(b, c, d, a, k[9], 21, -343485551);
+  x[0] = add32(a, x[0]); x[1] = add32(b, x[1]); x[2] = add32(c, x[2]); x[3] = add32(d, x[3]);
+}
+function cmn(q, a, b, x, s, t) { a = add32(add32(a, q), add32(x, t)); return add32((a << s) | (a >>> (32 - s)), b); }
+function ff(a, b, c, d, x, s, t) { return cmn((b & c) | (~b & d), a, b, x, s, t); }
+function gg(a, b, c, d, x, s, t) { return cmn((b & d) | (c & ~d), a, b, x, s, t); }
+function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
+function ii(a, b, c, d, x, s, t) { return cmn(c ^ (b | ~d), a, b, x, s, t); }
+function md51(s) {
+  const n = s.length, state = [1732584193, -271733879, -1732584194, 271733878];
+  let i;
+  for (i = 64; i <= s.length; i += 64) md5cycle(state, md5blk(s.substring(i - 64, i)));
+  s = s.substring(i - 64);
+  const tail = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (i = 0; i < s.length; i++) tail[i >> 2] |= s.charCodeAt(i) << ((i % 4) << 3);
+  tail[i >> 2] |= 0x80 << ((i % 4) << 3);
+  if (i > 55) { md5cycle(state, tail); for (i = 0; i < 16; i++) tail[i] = 0; }
+  tail[14] = n * 8;
+  md5cycle(state, tail);
+  return state;
+}
+function md5blk(s) {
+  const blks = [];
+  for (let i = 0; i < 64; i += 4) {
+    blks[i >> 2] = s.charCodeAt(i) + (s.charCodeAt(i + 1) << 8) + (s.charCodeAt(i + 2) << 16) + (s.charCodeAt(i + 3) << 24);
+  }
+  return blks;
+}
+const HEXC = '0123456789abcdef';
+function rhex(n) {
+  let s = '';
+  for (let j = 0; j < 4; j++) s += HEXC[(n >> (j * 8 + 4)) & 0xF] + HEXC[(n >> (j * 8)) & 0xF];
+  return s;
+}
+function add32(a, b) { return (a + b) & 0xFFFFFFFF; }
+function md5(s) {
+  const bytes = unescape(encodeURIComponent(s));
+  const state = md51(bytes);
+  return state.map(rhex).join('');
+}
+
+/* ------------------------------------------------------------ digest client */
+
+function parseChallenge(header) {
+  if (!header) return null;
+  const scheme = header.trim().split(/\s+/)[0];
+  if (scheme.toLowerCase() !== 'digest') return null;
+  const out = { scheme };
+  const re = /(\w+)=(?:"([^"]*)"|([^\s,]+))/g;
+  let m;
+  while ((m = re.exec(header))) out[m[1].toLowerCase()] = m[2] !== undefined ? m[2] : m[3];
+  return out;
+}
+
+function randomHex(n) {
+  const bytes = new Uint8Array(n);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function digestHeader(method, uri, ch, user, pass, ncState) {
+  const realm = ch.realm || '';
+  const nonce = ch.nonce || '';
+  const qop = (ch.qop || '').split(',')[0].trim();
+  const ha1 = md5(`${user}:${realm}:${pass}`);
+  const ha2 = md5(`${method}:${uri}`);
+  let parts = [
+    `username="${user}"`, `realm="${realm}"`, `nonce="${nonce}"`, `uri="${uri}"`,
+    `response="PLACEHOLDER"`,
+  ];
+  if (ch.opaque) parts.push(`opaque="${ch.opaque}"`);
+  let response;
+  if (qop) {
+    ncState.nc += 1;
+    const nc = String(ncState.nc).padStart(8, '0');
+    const cnonce = randomHex(8);
+    response = md5(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`);
+    parts.push(`qop=${qop}`, `nc=${nc}`, `cnonce="${cnonce}"`);
+  } else {
+    response = md5(`${ha1}:${nonce}:${ha2}`);
+  }
+  return 'Digest ' + parts.join(', ').replace('response="PLACEHOLDER"', `response="${response}"`);
+}
+
+/* --------------------------------------------------------------- app state */
+
+const app = {
+  demo: false,
+  base: '',            // origin of the WebDAV server
+  user: '', pass: '',
+  challenge: null,     // last WWW-Authenticate fields
+  nc: { nc: 0 },       // nonce counter, reset whenever a fresh nonce arrives
+  path: '/',           // current directory, decoded, with leading+trailing slash
+  entries: [],
+};
+
+function encodePath(decoded) {
+  return decoded.split('/').filter(s => s !== '').map(encodeURIComponent).join('/');
+}
+function dirHref(decoded) {
+  const enc = encodePath(decoded);
+  return enc ? `/${enc}/` : '/';
+}
+function joinPath(dir, name) {
+  return dir === '/' ? `/${name}` : dir + name;
+}
+function parentOf(dir) {
+  const parts = dir.split('/').filter(s => s !== '');
+  parts.pop();
+  return parts.length ? `/${parts.join('/')}/` : '/';
+}
+
+async function davFetch(method, decodedPath, opts = {}) {
+  const urlPath = dirHref(decodedPath === '/' ? '/' : decodedPath).replace(/\/$/, '') +
+    (decodedPath.endsWith('/') ? '/' : '');
+  const url = app.base + (urlPath === '' ? '/' : urlPath);
+  // The Digest uri must be the request-target exactly as sent, so build it
+  // once here and reuse it for signing.
+  const requestTarget = new URL(url).pathname + new URL(url).search;
+  const init = { method, headers: Object.assign({}, opts.headers) };
+  if (opts.body !== undefined) init.body = opts.body;
+  let resp = await fetch(url, init);
+  if (resp.status === 401) {
+    const ch = parseChallenge(resp.headers.get('www-authenticate'));
+    if (ch) {
+      app.challenge = ch;
+      app.nc.nc = 0;
+      const header = digestHeader(method, requestTarget, ch, app.user, app.pass, app.nc);
+      resp = await fetch(url, Object.assign({}, init, { headers: Object.assign({}, init.headers, { Authorization: header }) }));
+    }
+  }
+  return resp;
+}
+
+/* ------------------------------------------------------------- demo backend */
+
+const demoFS = {
+  '/': { dirs: ['documents', 'photos'], files: { 'README.txt': '这是 OTG Drive Bridge 的演示模式。\n真实数据在手机 OTG U 盘上；本页一切改动只存在内存里，刷新即恢复。\n', '连接说明.txt': '连接真实手机：\n1. 手机装 OTG Drive Bridge App 并启动共享\n2. 局域网内把本页地址栏填成 http://手机IP:8080/\n3. 手机端需放行 CORS；或直接用手机自带的同源文件页\n' } },
+  '/documents/': { dirs: [], files: { '部署方案.md': '# 部署方案\n\n静态 Pages + JS Digest 客户端。', '审计报告.md': '演示文件，内容随意。' } },
+  '/photos/': { dirs: [], files: { 'IMG_0001.jpg': '（演示：图片内容不存在）', 'IMG_0002.jpg': '（演示：图片内容不存在）' } },
+};
+
+const demo = {
+  list(dir) {
+    const node = demoFS[dir];
+    if (!node) throw new Error(`demo: no such dir ${dir}`);
+    const out = [];
+    node.dirs.forEach(d => out.push({ name: d, isDir: true, size: 0, mtime: Date.now() }));
+    Object.entries(node.files).forEach(([n, content]) => out.push({ name: n, isDir: false, size: content.length, mtime: Date.now() }));
+    return out;
+  },
+  get(dir, name) {
+    const node = demoFS[dir];
+    return node && node.files[name] !== undefined ? node.files[name] : null;
+  },
+  put(dir, name, content) {
+    demoFS[dir].files[name] = content;
+    if (!demoFS[dir]) throw new Error('demo: dir gone');
+  },
+  mkcol(dir, name) {
+    const child = joinPath(dir, name) + '/';
+    if (demoFS[child]) throw new Error('demo: already exists');
+    demoFS[child] = { dirs: [], files: {} };
+    demoFS[dir].dirs.push(name);
+  },
+  delete(dir, name, isDir) {
+    if (isDir) {
+      const child = joinPath(dir, name) + '/';
+      const node = demoFS[child];
+      if (node && (node.dirs.length || Object.keys(node.files).length)) throw new Error('demo: 目录非空（与服务端 SAF 行为一致，403）');
+      delete demoFS[child];
+      demoFS[dir].dirs = demoFS[dir].dirs.filter(d => d !== name);
+    } else {
+      delete demoFS[dir].files[name];
+    }
+  },
+};
+
+/* ----------------------------------------------------------------- rendering */
+
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function humanSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+  return `${(n / 1073741824).toFixed(1)} GB`;
+}
+function say(text) { document.getElementById('msg').textContent = text || ''; }
+
+function renderCrumb() {
+  const el = document.getElementById('crumb');
+  const parts = app.path.split('/').filter(s => s !== '');
+  let html = `<a href="#" onclick="ui.nav('/');return false;">根目录</a>`;
+  parts.forEach((p, i) => {
+    const target = `/${parts.slice(0, i + 1).join('/')}/`;
+    html += ` / <a href="#" onclick="ui.nav('${esc(target)}');return false;">${esc(p)}</a>`;
+  });
+  el.innerHTML = html;
+  document.getElementById('path-label').textContent = app.path;
+}
+
+function renderRows() {
+  const tbody = document.getElementById('rows');
+  const sorted = app.entries.slice().sort((a, b) =>
+    (a.isDir === b.isDir) ? a.name.toLowerCase().localeCompare(b.name.toLowerCase()) : (a.isDir ? -1 : 1));
+  if (!sorted.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">此文件夹为空。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = sorted.map(e => {
+    const child = joinPath(app.path, e.name);
+    const nameCell = e.isDir
+      ? `<a class="name dir" href="#" onclick="ui.nav('${esc(child + '/')}');return false;">${esc(e.name)}/</a>`
+      : `<a class="name" href="#" onclick="ui.download('${esc(child)}');return false;">${esc(e.name)}</a>`;
+    const size = e.isDir ? '—' : humanSize(e.size);
+    const mtime = e.mtime ? new Date(e.mtime).toLocaleString() : '—';
+    const del = `<button class="del" onclick="ui.remove('${esc(child)}', ${e.isDir})">✕</button>`;
+    return `<tr><td>${nameCell}</td><td class="num">${size}</td><td>${mtime}</td><td>${del}</td></tr>`;
+  }).join('');
+}
+
+function setMode(bannerText) {
+  const banner = document.getElementById('mode-banner');
+  banner.textContent = bannerText;
+  banner.classList.toggle('hidden', !bannerText);
+  document.getElementById('browser').classList.toggle('hidden', !bannerText);
+  document.getElementById('btn-disconnect').classList.toggle('hidden', !bannerText);
+  document.getElementById('btn-connect').disabled = !!bannerText;
+  document.getElementById('btn-demo').disabled = !!bannerText;
+}
+
+/* --------------------------------------------------------------------- ui */
+
+const ui = {
+  async connect() {
+    const raw = document.getElementById('url').value.trim();
+    if (!raw) { say('请填写服务器地址'); return; }
+    let base;
+    try { base = new URL(raw.match(/^https?:\/\//) ? raw : `http://${raw}`).origin; }
+    catch { say('地址无法解析'); return; }
+    app.demo = false;
+    app.base = base;
+    app.user = document.getElementById('user').value.trim();
+    app.pass = document.getElementById('pass').value;
+    app.challenge = null; app.nc.nc = 0;
+    try { localStorage.setItem('otg-last', JSON.stringify({ url: raw, user: app.user })); } catch {}
+    try {
+      const resp = await davFetch('PROPFIND', '/', {
+        headers: { Depth: '1', 'Content-Type': 'application/xml' },
+        body: PROPFIND_BODY,
+      });
+      if (resp.status === 401) { say('401：用户名或密码不对（凭据见手机 App 的「访问凭据」或「局域网仅密钥」卡片）'); return; }
+      if (!resp.ok) { say(`服务器返回 HTTP ${resp.status}`); return; }
+      app.entries = parseMultistatus(await resp.text(), '/');
+      app.path = '/';
+      setMode(`已连接 ${base}（真实模式）`);
+      renderCrumb(); renderRows(); say('');
+    } catch (e) {
+      say('连不上：浏览器跨域被拦（服务器需放行 CORS）。手机上直接开 http://手机IP:8080/ 用自带文件页，或点「演示模式」。');
+    }
+  },
+
+  startDemo() {
+    app.demo = true;
+    app.path = '/';
+    setMode('演示模式 — 数据仅在本页内存，刷新即恢复');
+    app.entries = demo.list('/');
+    renderCrumb(); renderRows(); say('');
+  },
+
+  disconnect() {
+    app.demo = false; app.challenge = null; app.entries = [];
+    setMode('');
+    say('');
+  },
+
+  nav(dir) {
+    app.path = dir;
+    if (app.demo) {
+      app.entries = demo.list(dir);
+    } else {
+      say('加载中…');
+      davFetch('PROPFIND', dir, { headers: { Depth: '1', 'Content-Type': 'application/xml' }, body: PROPFIND_BODY })
+        .then(async resp => {
+          if (resp.status === 401) { app.challenge = parseChallenge(resp.headers.get('www-authenticate')); app.nc.nc = 0; }
+          if (!resp.ok) { say(`PROPFIND HTTP ${resp.status}`); return; }
+          app.entries = parseMultistatus(await resp.text(), dir);
+          renderCrumb(); renderRows(); say('');
+        })
+        .catch(() => say('请求失败（跨域或网络）'));
+      return;
+    }
+    renderCrumb(); renderRows(); say('');
+  },
+
+  refresh() { ui.nav(app.path); },
+
+  async download(path) {
+    if (app.demo) {
+      const content = demo.get(parentOf(path), path.split('/').filter(s => s).pop());
+      saveBlob(new Blob([content], { type: 'application/octet-stream' }), path.split('/').pop());
+      return;
+    }
+    try {
+      const resp = await davFetch('GET', path);
+      if (!resp.ok) { say(`下载失败 HTTP ${resp.status}`); return; }
+      saveBlob(await resp.blob(), decodeURIComponent(path.split('/').pop()));
+    } catch { say('下载失败（跨域或网络）'); }
+  },
+
+  uploadClick() { document.getElementById('file').click(); },
+
+  async uploadFiles(input) {
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    for (const f of files) {
+      const target = joinPath(app.path, f.name);
+      try {
+        if (app.demo) {
+          demo.put(app.path, f.name, await f.text());
+        } else {
+          const resp = await davFetch('PUT', target, { body: f, headers: { 'Content-Type': f.type || 'application/octet-stream' } });
+          if (!resp.ok) { say(`上传 ${f.name} 失败：HTTP ${resp.status}`); continue; }
+        }
+      } catch { say(`上传 ${f.name} 失败（跨域或网络）`); continue; }
+    }
+    input.value = '';
+    ui.refresh();
+  },
+
+  async mkdirClick() {
+    const name = window.prompt('新文件夹名');
+    if (!name) return;
+    try {
+      if (app.demo) demo.mkcol(app.path, name);
+      else {
+        const resp = await davFetch('MKCOL', joinPath(app.path, name));
+        if (!resp.ok && resp.status !== 201) { say(`新建文件夹失败：HTTP ${resp.status}`); return; }
+      }
+      ui.refresh();
+    } catch (e) { say(e.message || '新建失败'); }
+  },
+
+  async remove(path, isDir) {
+    const name = path.split('/').filter(s => s).pop();
+    if (!window.confirm(`删除 ${name}${isDir ? '（文件夹）' : ''}？`)) return;
+    try {
+      if (app.demo) demo.delete(parentOf(path), name, isDir);
+      else {
+        const resp = await davFetch('DELETE', path);
+        if (!resp.ok) {
+          say(resp.status === 403 && isDir ? '删除失败：目录非空（手机 SAF 限制，先清空再删）' : `删除失败：HTTP ${resp.status}`);
+          return;
+        }
+      }
+      ui.refresh();
+    } catch (e) { say(e.message || '删除失败'); }
+  },
+};
+
+function saveBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+const PROPFIND_BODY =
+  '<?xml version="1.0" encoding="utf-8"?>' +
+  '<d:propfind xmlns:d="DAV:"><d:prop><d:displayname/><d:getcontentlength/><d:getlastmodified/><d:resourcetype/></d:prop></d:propfind>';
+
+function parseMultistatus(xmlText, dir) {
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  const responses = Array.from(doc.getElementsByTagName('*')).filter(n => n.localName === 'response');
+  const dirHrefNorm = dirHref(dir);
+  const out = [];
+  for (const r of responses) {
+    const hrefEl = Array.from(r.getElementsByTagName('*')).find(n => n.localName === 'href');
+    if (!hrefEl) continue;
+    let href = decodeURIComponent(hrefEl.textContent);
+    if (!href.endsWith('/')) href += '';
+    const isDir = !!Array.from(r.getElementsByTagName('*')).find(n => n.localName === 'collection');
+    const norm = href.endsWith('/') || isDir ? (href.endsWith('/') ? href : href + '/') : href;
+    const decodedDir = dirHrefNorm;
+    // The Depth-1 answer includes the collection itself; drop it.
+    if ((isDir ? norm : href) === decodedDir || href === decodedDir.replace(/\/$/, '')) continue;
+    const text = tag => {
+      const el = Array.from(r.getElementsByTagName('*')).find(n => n.localName === tag);
+      return el ? el.textContent : '';
+    };
+    const length = parseInt(text('getcontentlength') || '0', 10) || 0;
+    const modified = Date.parse(text('getlastmodified') || '') || 0;
+    const segments = href.split('/').filter(s => s !== '');
+    const name = segments.length ? segments[segments.length - 1] : href;
+    out.push({ name, isDir, size: length, mtime: modified });
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ wiring */
+
+window.ui = ui;
+document.getElementById('btn-connect').addEventListener('click', ui.connect);
+document.getElementById('btn-demo').addEventListener('click', ui.startDemo);
+document.getElementById('btn-disconnect').addEventListener('click', ui.disconnect);
+document.getElementById('file').addEventListener('change', e => ui.uploadFiles(e.target));
+document.getElementById('pass').addEventListener('keydown', e => { if (e.key === 'Enter') ui.connect(); });
+try {
+  const last = JSON.parse(localStorage.getItem('otg-last') || 'null');
+  if (last) {
+    document.getElementById('url').value = last.url || '';
+    document.getElementById('user').value = last.user || '';
+  }
+} catch {}

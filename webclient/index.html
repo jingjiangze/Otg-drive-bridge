@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OTG Drive Bridge — Web Client</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>OTG Drive Bridge</h1>
+    <span class="sub">把手机 OTG U 盘挂进浏览器的 WebDAV 客户端</span>
+  </div>
+  <nav>
+    <a href="https://github.com/jingjiangze/Otg-drive-bridge" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/jingjiangze/Otg-drive-bridge/releases/tag/v0.1.0" target="_blank" rel="noopener">下载 APK / EXE</a>
+  </nav>
+</header>
+
+<div id="mode-banner" class="banner hidden"></div>
+
+<section class="card" id="connect-card">
+  <h2>连接 WebDAV 服务器</h2>
+  <div class="row">
+    <input id="url" type="text" placeholder="http://手机IP:8080/" spellcheck="false">
+  </div>
+  <div class="row two">
+    <input id="user" type="text" placeholder="用户名" spellcheck="false" autocomplete="off">
+    <input id="pass" type="password" placeholder="密码 / 密钥" autocomplete="off">
+  </div>
+  <div class="row actions">
+    <button id="btn-connect" class="primary">连接</button>
+    <button id="btn-demo">演示模式</button>
+    <button id="btn-disconnect" class="hidden">断开</button>
+    <span id="msg" class="msg"></span>
+  </div>
+  <p class="hint">
+    地址与用户名来自手机 App「连接方式」卡片；密码在「访问凭据」卡片。浏览器到手机是跨域请求，
+    手机端服务器需放行 CORS 才能连上——手机自带的同源文件页（直接用浏览器打开
+    <code>http://手机IP:8080/</code>）不受此限制。演示模式无需任何服务器。
+  </p>
+</section>
+
+<main id="browser" class="hidden">
+  <nav id="crumb" class="crumb"></nav>
+  <div class="toolbar">
+    <input type="file" id="file" multiple class="hidden">
+    <button onclick="ui.uploadClick()">上传文件</button>
+    <button onclick="ui.mkdirClick()">新建文件夹</button>
+    <button onclick="ui.refresh()">刷新</button>
+    <span class="path-label" id="path-label"></span>
+  </div>
+  <table>
+    <thead><tr><th>名称</th><th class="num">大小</th><th>修改时间</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</main>
+
+<footer>
+  OTG Drive Bridge 实例站 · 静态 WebDAV 客户端（演示数据仅存在本页内存） ·
+  凭据只保存在当前页面内存，刷新即丢
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
