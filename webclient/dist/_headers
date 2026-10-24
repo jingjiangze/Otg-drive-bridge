@@ -1,0 +1,16 @@
+# Security headers for every response. Cache-Control is deliberately NOT set
+# on /* — _headers merges same-name headers across matching rules with a comma,
+# and a stray rule would leak into the HTML rule below.
+/*
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+
+# The deployed page is the whole app in one file. A 1-day browser cache with
+# stale-while-revalidate makes every repeat open instant while the browser
+# refreshes in the background; Pages rules live on both / and /index.html
+# because /index.html 308s to / and only the bare-root rule would be matched.
+/
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+/index.html
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800

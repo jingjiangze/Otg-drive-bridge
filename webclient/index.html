@@ -5,54 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OTG Drive Bridge — Web Client</title>
 <link rel="icon" href="data:,">
-<script>
-/*
- * Resource loader with a mirror chain.
- *
- * The HTML entry lives on Cloudflare Pages, but from mainland China the CF
- * edge is the slow hop (measured 2026-10-24; page assets total <26KB so size
- * was ruled out). jsDelivr mirrors this public GitHub repo with correct MIME
- * for JS/CSS (it serves .html as text/plain, which is why the HTML itself
- * stays here). Mirrors are tried first, same-origin last — the site still
- * works with jsDelivr fully down.
- *
- * The commit SHA pin is what makes every mirror URL permanently cacheable.
- * When app.js/style.css change: commit them first, then update WEB_SHA to
- * that commit in a follow-up commit (see webclient/README.md).
- */
-(function () {
-  var WEB_SHA = '20db6adaddf9daef059c45d5fe4930d797e3f690';
-  var GH = 'https://<HOST>/gh/jingjiangze/Otg-drive-bridge@' + WEB_SHA + '/webclient/';
-  var BASES = [
-    GH.replace('<HOST>', 'cdn.jsdelivr.net'),
-    GH.replace('<HOST>', 'testingcf.jsdelivr.net'),
-    GH.replace('<HOST>', 'gcore.jsdelivr.net'),
-    GH.replace('<HOST>', 'fastly.jsdelivr.net'),
-    '' // same origin: the pages.dev / otg.jiangjiangze.icu fallback
-  ];
-  function loadCss(i) {
-    if (i >= BASES.length) return;
-    var l = document.createElement('link');
-    l.rel = 'stylesheet';
-    l.href = BASES[i] + 'style.css';
-    l.onerror = function () { l.remove(); loadCss(i + 1); };
-    document.head.appendChild(l);
-  }
-  function loadJs(i) {
-    var msg = document.getElementById('msg');
-    if (i >= BASES.length) {
-      if (msg) msg.textContent = '资源加载失败：镜像与同源均不可达，请检查网络后刷新。';
-      return;
-    }
-    var s = document.createElement('script');
-    s.src = BASES[i] + 'app.js';
-    s.onerror = function () { s.remove(); loadJs(i + 1); };
-    document.body.appendChild(s);
-  }
-  loadCss(0);
-  window.__loadApp = loadJs;
-})();
-</script>
+<!-- Source form: build.mjs inlines style.css and app.js into dist/index.html
+     so the deployed page is a single request. Do not reference them with
+     <link>/<script src> in a deployed artifact — every extra hop is an
+     offshore round trip for mainland visitors. -->
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
@@ -107,11 +64,9 @@
 
 <footer>
   OTG Drive Bridge 实例站 · 静态 WebDAV 客户端（演示数据仅存在本页内存） ·
-  凭据只保存在当前页面内存，刷新即丢<br>
-  静态资源经 jsDelivr 镜像（GitHub 仓库固定 commit），加载失败自动回落本站 ·
-  备用入口：<a href="https://otg-drive-bridge.pages.dev/">otg-drive-bridge.pages.dev</a>
-  <noscript><br>本页需要启用 JavaScript。</noscript>
+  凭据只保存在当前页面内存，刷新即丢
+  <!-- ENTRIES-BELOW -->
 </footer>
-<script>window.__loadApp && window.__loadApp(0);</script>
+<script src="app.js"></script>
 </body>
 </html>
