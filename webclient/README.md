@@ -16,21 +16,26 @@
   `app/src/main/kotlin/com/jingjiangze/otgdrivebridge/server/HtmlIndex.kt` 渲染）
   不受 CORS 限制，是日常使用的正路；本站是「任何浏览器、任何设备」的兜底入口与演示面。
 
-## 资源镜像链（2026-10-24 加装）
+## 交付形态：单文件（2026-10-24 第二轮提速）
 
-国内访问 CF 边缘是主要慢因（资源总体 <26KB，体积已排除；实测见
-`_tmp/otg-web-mirror-2026-10-24/`）。`index.html` 内嵌加载链：
+第一轮的 jsDelivr 镜像链已**撤下**：二轮实测发现它的致命模式——用户浏览器挂着
+Clash 系统代理时，当前节点对 CF 与 jsDelivr 的 TLS 全部黑洞（curl 35），四级
+`onerror` 链会**串行等待每级 TCP 超时**，比不用镜像更慢。同时 CF 自定义域直连也有
+约 50% 的 15s 挂起率（边缘抖动）。
 
-```
-cdn.jsdelivr.net → testingcf.jsdelivr.net → gcore.jsdelivr.net → fastly.jsdelivr.net → 同源
-```
+现行方案（`build.mjs` → `dist/`）：
 
-- jsDelivr 只镜像**公开仓库**，URL 用 **commit SHA 固定**（`@<WEB_SHA>`），永久缓存、字节可复现；
-  jsDelivr 对 `.html` 返回 text/plain，所以 **HTML 入口只能留在本站**，镜像只承载 JS/CSS。
-- **升级步骤（固定两段提交）**：改 `app.js`/`style.css` → 先提交资源 → 再提交把 `index.html`
-  的 `WEB_SHA` 指到上一个提交的 SHA → 重跑本 README 的部署命令。顺序反了镜像会拿到旧资源。
-- jsDelivr 缓存地址自检：`https://cdn.jsdelivr.net/gh/jingjiangze/Otg-drive-bridge@<SHA>/webclient/app.js`
-  应返回 200 / `application/javascript` / 字节数与仓库一致。
+- **整站内联为 `dist/index.html` 一个文件**（CSS+JS 全内联，首屏恰好 1 个请求，
+  无瀑布、无镜像链黑洞风险）；
+- `_headers` 给 HTML `Cache-Control: max-age=86400, stale-while-revalidate=604800`
+  ——浏览器当天内重复打开**秒开**，后台自动刷新；
+- 部署即 `wrangler pages deploy webclient/dist`（配方见下）。
+
+**已知边界**：首次访问（或缓存过期后）仍依赖 CF 边缘健康度；若访问环境走代理，
+建议对 `jiangjiangze.icu` 加直连规则（当前代理节点对 CF 是 TLS 黑洞）。
+真正的大陆快源需要能吐 `text/html` 的国内托管——实测 ModelScope dataset resolve
+对 `.html` 返回 `attachment` 下载头（不可当入口，仅素材镜像可用），备选是
+阿里云 OSS 静态托管 / ModelScope 创空间 / 腾讯 EdgeOne Pages（均需账号侧操作）。
 
 ## 部署（本工作区已验证配方，同公告后台/下载站）
 
