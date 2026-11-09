@@ -149,7 +149,7 @@ CI（`.github/workflows/ci.yml`）三个 job：
 
 ## 许可与致谢
 
-- 本项目代码以 **MIT** 发布（见 `LICENSE`）。
+- 本项目代码以 **GPL-3.0-or-later** 发布（见 `LICENSE`）：可自由使用与修改，但分发衍生作品须同样以 GPL-3.0-or-later 开源并提供源代码。
 - 协议层设计参考了以下 **Apache-2.0** 项目：`anujkumarprasad/webdav-server-apk`（Ktor/CIO + DocumentFile 引擎）、`messense/dav-server-rs`（方法集与 XML 形状）。
 - WebDAV 规范：[RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)；Digest 认证：[RFC 2617 §3.2.2](https://www.rfc-editor.org/rfc/rfc2617#section-3.2.2)。
 - 未采用 `miltonio/milton2`（AGPL，许可不兼容）与 `gregko/Mini-WebDAV-server-for-Android`（无 LICENSE 文件）。
